@@ -1,0 +1,38 @@
+# Claude Code
+.claude/
+*.claude
+CLAUDE.md
+
+# Build outputs
+build/
+out/
+x64/
+Debug/
+Release/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.sdf
+*.opensdf
+ipch/
+
+# Compiled binaries
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+
+# Third-party libraries (vcpkg 또는 별도 관리)
+third_party/
+
+# Temp / OS
+*.tmp
+Thumbs.db
+.DS_Store
