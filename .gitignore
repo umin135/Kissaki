@@ -32,6 +32,12 @@ ipch/
 # Third-party libraries (vcpkg 또는 별도 관리)
 third_party/
 
+# .NET / C# build output
+bin/
+obj/
+*.nupkg
+*.snupkg
+
 # Temp / OS
 *.tmp
 Thumbs.db

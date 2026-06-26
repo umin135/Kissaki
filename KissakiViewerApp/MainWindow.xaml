@@ -1,0 +1,288 @@
+<Window x:Class="KissakiViewer.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:adonisUi="clr-namespace:AdonisUI;assembly=AdonisUI"
+        xmlns:vm="clr-namespace:KissakiViewer.ViewModels"
+        xmlns:helix="http://helix-toolkit.org/wpf"
+        Title="KissakiViewer — KatanaEngine Asset Browser"
+        Width="1200" Height="750"
+        MinWidth="900" MinHeight="500"
+        Style="{DynamicResource {x:Type Window}}"
+        Loaded="Window_Loaded">
+
+    <Window.DataContext>
+        <vm:MainViewModel/>
+    </Window.DataContext>
+
+    <Window.Resources>
+        <!-- null → Visible / not-null → Collapsed -->
+        <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- ── Toolbar ─────────────────────────────────────────────────────── -->
+        <Border Grid.Row="0"
+                Background="{DynamicResource {x:Static adonisUi:Brushes.Layer1BackgroundBrush}}"
+                BorderThickness="0,0,0,1"
+                BorderBrush="{DynamicResource {x:Static adonisUi:Brushes.Layer1BorderBrush}}"
+                Padding="8,6">
+            <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
+
+                <TextBlock Text="게임 경로:" VerticalAlignment="Center" Margin="0,0,6,0"
+                           Foreground="{DynamicResource {x:Static adonisUi:Brushes.ForegroundBrush}}"/>
+                <TextBox Text="{Binding GameDirectory, UpdateSourceTrigger=PropertyChanged}"
+                         Width="350" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <Button Content="찾아보기"
+                        Command="{Binding BrowseGameDirectoryCommand}"
+                        Margin="0,0,4,0"/>
+                <Button Content="로드"
+                        Command="{Binding LoadCommand}"
+                        Margin="0,0,16,0"/>
+
+                <TextBlock Text="타입:" VerticalAlignment="Center" Margin="0,0,6,0"
+                           Foreground="{DynamicResource {x:Static adonisUi:Brushes.ForegroundBrush}}"/>
+                <ComboBox ItemsSource="{Binding TypeFilters}"
+                          SelectedItem="{Binding SelectedTypeFilter}"
+                          Width="130" Margin="0,0,12,0"/>
+
+                <TextBlock Text="검색:" VerticalAlignment="Center" Margin="0,0,6,0"
+                           Foreground="{DynamicResource {x:Static adonisUi:Brushes.ForegroundBrush}}"/>
+                <TextBox Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
+                         Width="160" VerticalAlignment="Center" Margin="0,0,16,0"/>
+
+                <Button Content="선택 항목 내보내기"
+                        Command="{Binding ExportSelectedCommand}"
+                        Margin="0,0,8,0"/>
+                <Button Content="파일명 복구"
+                        Command="{Binding RecoverNamesCommand}"
+                        ToolTip="exe 스캔 + 브루트포스로 FileKtid → 원본 경로 복구"/>
+            </WrapPanel>
+        </Border>
+
+        <!-- ── Main area ──────────────────────────────────────────────────── -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="320" MinWidth="180"/>
+                <ColumnDefinition Width="5"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left: asset list -->
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Padding="6,3"
+                        Background="{DynamicResource {x:Static adonisUi:Brushes.Layer1BackgroundBrush}}"
+                        BorderThickness="0,0,0,1"
+                        BorderBrush="{DynamicResource {x:Static adonisUi:Brushes.Layer1BorderBrush}}">
+                    <TextBlock FontSize="11"
+                               Foreground="{DynamicResource {x:Static adonisUi:Brushes.DisabledForegroundBrush}}">
+                        <Run Text="{Binding FilteredAssets.Count, Mode=OneWay}"/>
+                        <Run Text="개 에셋"/>
+                    </TextBlock>
+                </Border>
+
+                <ListView Grid.Row="1"
+                          x:Name="AssetListView"
+                          ItemsSource="{Binding FilteredAssets}"
+                          SelectedItem="{Binding SelectedAsset}"
+                          BorderThickness="0"
+                          VirtualizingPanel.IsVirtualizing="True"
+                          VirtualizingPanel.VirtualizationMode="Recycling"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            <Setter Property="Padding" Value="6,3"/>
+                            <Setter Property="MinHeight" Value="32"/>
+                            <Setter Property="Foreground" Value="#DCDCDC"/>
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Background" Value="#2A2A2A"/>
+                                </Trigger>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter Property="Background" Value="#1A6B9A"/>
+                                    <Setter Property="Foreground" Value="White"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               FontFamily="Consolas" FontSize="12"/>
+                                    <TextBlock FontSize="10" Opacity="0.65">
+                                        <Run Text="{Binding TypeExt, Mode=OneWay}"/>
+                                        <Run Text=" "/>
+                                        <Run Text="{Binding KtidHex, Mode=OneWay}" Foreground="#888"/>
+                                    </TextBlock>
+                                </StackPanel>
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding SizeStr}"
+                                           FontSize="10" VerticalAlignment="Center"
+                                           Margin="4,0,0,0" Opacity="0.55"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+
+            <!-- Splitter -->
+            <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch"
+                          Background="{DynamicResource {x:Static adonisUi:Brushes.Layer1BorderBrush}}"/>
+
+            <!-- Right: preview -->
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0"
+                        Background="{DynamicResource {x:Static adonisUi:Brushes.Layer0BackgroundBrush}}">
+                    <Grid>
+                        <!-- Placeholder: shown when neither texture nor model is loaded -->
+                        <TextBlock Text="에셋을 선택하면 미리보기가 표시됩니다."
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   FontSize="13"
+                                   Foreground="{DynamicResource {x:Static adonisUi:Brushes.DisabledForegroundBrush}}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding PreviewImage}"    Value="{x:Null}"/>
+                                                <Condition Binding="{Binding HasModelPreview}" Value="False"/>
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </MultiDataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+
+                        <!-- Texture preview -->
+                        <Image Source="{Binding PreviewImage}"
+                               Stretch="Uniform" Margin="8"
+                               RenderOptions.BitmapScalingMode="HighQuality">
+                            <Image.Style>
+                                <Style TargetType="Image">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding PreviewImage}" Value="{x:Null}">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Image.Style>
+                        </Image>
+
+                        <!-- 3D model preview -->
+                        <helix:HelixViewport3D x:Name="Viewport3D"
+                                               Background="#111111"
+                                               ShowCoordinateSystem="False"
+                                               ShowViewCube="True"
+                                               ZoomExtentsWhenLoaded="False">
+                            <helix:HelixViewport3D.Style>
+                                <Style TargetType="helix:HelixViewport3D">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasModelPreview}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </helix:HelixViewport3D.Style>
+                            <helix:DefaultLights/>
+                        </helix:HelixViewport3D>
+                    </Grid>
+                </Border>
+
+                <!-- Slot slider — visible only when G1T has multiple decoded slots -->
+                <Border Grid.Row="1" Padding="8,5"
+                        Background="{DynamicResource {x:Static adonisUi:Brushes.Layer1BackgroundBrush}}"
+                        BorderThickness="0,1,0,0"
+                        BorderBrush="{DynamicResource {x:Static adonisUi:Brushes.Layer1BorderBrush}}"
+                        Visibility="{Binding HasMultipleSlots, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="슬롯" FontSize="11" VerticalAlignment="Center"
+                                   Foreground="#DCDCDC" Margin="0,0,8,0"/>
+                        <Slider Value="{Binding CurrentSlotIndex}"
+                                Minimum="0"
+                                Maximum="{Binding SlotMax, Mode=OneWay}"
+                                Width="180"
+                                IsSnapToTickEnabled="True"
+                                TickFrequency="1"
+                                VerticalAlignment="Center"/>
+                        <TextBlock FontFamily="Consolas" FontSize="11"
+                                   VerticalAlignment="Center" Margin="8,0,0,0"
+                                   Foreground="#DCDCDC">
+                            <Run Text="{Binding CurrentSlotIndex, Mode=OneWay}"/>
+                            <Run Text=" / "/>
+                            <Run Text="{Binding SlotMax, Mode=OneWay}"/>
+                        </TextBlock>
+                    </StackPanel>
+                </Border>
+
+                <!-- Preview info -->
+                <Border Grid.Row="2" Padding="8,4"
+                        Background="{DynamicResource {x:Static adonisUi:Brushes.Layer1BackgroundBrush}}"
+                        BorderThickness="0,1,0,0"
+                        BorderBrush="{DynamicResource {x:Static adonisUi:Brushes.Layer1BorderBrush}}">
+                    <TextBlock Text="{Binding PreviewInfo}"
+                               FontFamily="Consolas" FontSize="11"
+                               Foreground="{DynamicResource {x:Static adonisUi:Brushes.DisabledForegroundBrush}}"/>
+                </Border>
+            </Grid>
+        </Grid>
+
+        <!-- ── Status bar ─────────────────────────────────────────────────── -->
+        <Border Grid.Row="2"
+                Background="{DynamicResource {x:Static adonisUi:Brushes.Layer2BackgroundBrush}}"
+                Padding="8,3">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="200"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0"
+                           Text="{Binding StatusText}"
+                           Foreground="{DynamicResource {x:Static adonisUi:Brushes.ForegroundBrush}}"
+                           FontSize="11" VerticalAlignment="Center"/>
+
+                <ProgressBar Grid.Column="1"
+                             Value="{Binding LoadProgress}" Maximum="100" Height="6"
+                             VerticalAlignment="Center" Margin="0,0,4,0">
+                    <ProgressBar.Style>
+                        <Style TargetType="ProgressBar" BasedOn="{StaticResource {x:Type ProgressBar}}">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsLoading}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ProgressBar.Style>
+                </ProgressBar>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
