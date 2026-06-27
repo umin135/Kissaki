@@ -112,7 +112,7 @@ public static class G1tDecoder
                 if (extSize > 0x400) extSize = 0x0C;
             }
 
-            int pixStart = ep + 12 + (int)extSize;
+            int pixStart = ep + 8 + (int)extSize;
 
             bool fmtKnown = s_fmtMap.TryGetValue(fmtCode, out var fd);
             if (sequential && fmtCode == 0)
