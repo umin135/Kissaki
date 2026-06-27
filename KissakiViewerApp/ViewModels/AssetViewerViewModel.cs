@@ -100,6 +100,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         _allG1tByFid     = allG1tByFid;
         _allAssetsByKtid = allAssetsByKtid;
         _getG1mMap       = getG1mMap;
+        _tabs.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasTabs));
     }
 
     public void OpenAsset(AssetItemViewModel vm)
@@ -250,7 +251,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
 
             IEnumerable<int> neededSlots = model.MaterialTextures.Count > 0
                 ? model.MaterialTextures.Select(x => x.G1tSlot)
-                : model.Submeshes.Select(s => (int)s.MaterialIndex).Distinct();
+                : model.Submeshes.Select(s => s.MaterialIndex).Distinct();
 
             var distinctSlots = neededSlots.Distinct()
                 .Where(s => s >= 0 && s / texPerFile < g1tFileList.Count)
@@ -292,8 +293,8 @@ public sealed partial class AssetViewerViewModel : ObservableObject
 
             // Build matIdx → BitmapSource
             IEnumerable<(int matIdx, int g1tSlot)> assignments = model.MaterialTextures.Count > 0
-                ? model.MaterialTextures.Select(x => ((int)x.MatIdx, (int)x.G1tSlot))
-                : model.Submeshes.Select(s => ((int)s.MaterialIndex, (int)s.MaterialIndex)).Distinct();
+                ? model.MaterialTextures.Select(x => (x.MatIdx, x.G1tSlot))
+                : model.Submeshes.Select(s => (s.MaterialIndex, s.MaterialIndex)).Distinct();
 
             var texBitmaps = new Dictionary<int, BitmapSource>();
             foreach (var (matIdx, g1tSlot) in assignments)

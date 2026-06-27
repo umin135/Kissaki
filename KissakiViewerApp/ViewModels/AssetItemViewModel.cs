@@ -19,16 +19,16 @@ public sealed partial class AssetItemViewModel : ObservableObject
     private string? _recoveredName;
 
     // "kasumi_body" or "0x1234abcd"
-    public string DisplayName => _recoveredName != null
-        ? GetBaseName(_recoveredName)
+    public string DisplayName => RecoveredName != null
+        ? GetBaseName(RecoveredName)
         : KtidHex;
 
     // "kasumi_body.g1m" or "0x1234abcd.g1m"
     public string DisplayFileName => DisplayName + TypeExt;
 
     // "character/kasumi" — empty string if no recovered name or no folder
-    public string FolderPath => _recoveredName != null
-        ? GetFolderPart(_recoveredName)
+    public string FolderPath => RecoveredName != null
+        ? GetFolderPart(RecoveredName)
         : string.Empty;
 
     [ObservableProperty]

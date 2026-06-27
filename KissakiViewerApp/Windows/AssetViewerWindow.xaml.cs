@@ -99,6 +99,11 @@ public partial class AssetViewerWindow : Window
     {
         var allMeshes = new Model3DGroup();
 
+        // Build per-material UV channel lookup (from section 0x10002 layer field)
+        var matUvLayer = new Dictionary<int, int>();
+        foreach (var (matIdx, _, uvLayer) in model.MaterialTextures)
+            matUvLayer.TryAdd(matIdx, uvLayer);
+
         foreach (var sm in model.Submeshes)
         {
             if (sm.Positions.Length == 0 || sm.Indices.Length == 0) continue;
@@ -116,18 +121,27 @@ public partial class AssetViewerWindow : Window
             if (sm.Normals.Length == sm.Positions.Length)
             {
                 var norms = new Vector3DCollection(sm.Normals.Length);
-                foreach (var n in sm.Normals) norms.Add(ToWpfDir(n));
+                // Negate normals: ToWpf has det=-1 (LH→RH flip), which reverses normal direction.
+                // Without negation the diffuse lighting hits the inside of every face.
+                foreach (var n in sm.Normals) norms.Add(ToWpfDir(-n));
                 mesh.Normals = norms;
             }
 
-            if (sm.TexCoords.Length > 0)
+            // Select the correct UV channel from material's 'layer' field
+            int uvLayer = matUvLayer.TryGetValue(sm.MaterialIndex, out int lay) ? lay : 0;
+            var rawUvs  = (uvLayer < sm.AllTexCoords.Length && sm.AllTexCoords[uvLayer].Length > 0)
+                ? sm.AllTexCoords[uvLayer]
+                : sm.TexCoords;
+
+            if (rawUvs.Length > 0)
             {
-                var uvs = new PointCollection(sm.TexCoords.Length);
-                foreach (var uv in sm.TexCoords) uvs.Add(new System.Windows.Point(uv.X, uv.Y));
+                var uvs = new PointCollection(rawUvs.Length);
+                // Flip V: G1M stores V with 0 at bottom (OpenGL-style) while WPF expects 0 at top.
+                foreach (var uv in rawUvs) uvs.Add(new System.Windows.Point(uv.X, 1.0 - uv.Y));
                 mesh.TextureCoordinates = uvs;
             }
 
-            int matIdx = (int)sm.MaterialIndex;
+            int matIdx = sm.MaterialIndex;
             textures.TryGetValue(matIdx, out var tex);
             var material = MakeMeshMaterial(tex);
 

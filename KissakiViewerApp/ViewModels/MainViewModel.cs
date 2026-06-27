@@ -95,9 +95,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ── Property change reactions ─────────────────────────────────────────────
 
-    partial void OnFilterTextChanged(string _)          => ApplyFilter();
-    partial void OnSelectedTypeFilterChanged(string _)  => ApplyFilter();
-    partial void OnSelectedFolderNodeChanged(FolderNode? _) => ApplyFilter();
+    partial void OnFilterTextChanged(string value)           => ApplyFilter();
+    partial void OnSelectedTypeFilterChanged(string value)   => ApplyFilter();
+    partial void OnSelectedFolderNodeChanged(FolderNode? value) => ApplyFilter();
 
     // ── Load ──────────────────────────────────────────────────────────────────
 

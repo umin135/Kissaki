@@ -15,12 +15,13 @@ public sealed class G1mBone
 
 public sealed class G1mSubmesh
 {
-    public Vector3[] Positions     { get; set; } = [];
-    public Vector3[] Normals       { get; set; } = [];
-    public Vector2[] TexCoords     { get; set; } = [];
-    public int[]     Indices       { get; set; } = [];
-    public int       MaterialIndex { get; set; } = -1;
-    public uint      MatPalId      { get; set; }
+    public Vector3[]   Positions     { get; set; } = [];
+    public Vector3[]   Normals       { get; set; } = [];
+    public Vector2[]   TexCoords     { get; set; } = [];   // channel 0 (primary UV)
+    public Vector2[][] AllTexCoords  { get; set; } = [];   // all channels: [0]=primary, [1]=secondary, …
+    public int[]       Indices       { get; set; } = [];
+    public int         MaterialIndex { get; set; } = -1;
+    public uint        MatPalId      { get; set; }
 }
 
 public sealed class G1mData
@@ -36,8 +37,8 @@ public sealed class G1mData
     public List<(uint Id, int Offset, int Size)> G1mgSections { get; } = [];
     // Raw bytes of specific G1MG sections for analysis (keyed by section id)
     public Dictionary<uint, byte[]> G1mgSectionRaw { get; } = [];
-    // material index → COLOR texture slot index within the G1T file (from sec 0x10002)
-    public List<(int MatIdx, int G1tSlot)> MaterialTextures { get; } = [];
+    // material index → COLOR texture slot index and UV channel (from sec 0x10002)
+    public List<(int MatIdx, int G1tSlot, int UvLayer)> MaterialTextures { get; } = [];
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────────
@@ -245,9 +246,10 @@ public static class G1mReader
             for (uint t = 0; t < texCount && pos + 12 <= end; t++, pos += 12)
             {
                 ushort texIndex = ReadU16(data, pos + 0);
+                ushort layer    = ReadU16(data, pos + 2);
                 ushort texType  = ReadU16(data, pos + 4);
                 if (texType == 1) // COLOR = albedo in DOA6
-                    r.MaterialTextures.Add((matIdx, (int)texIndex));
+                    r.MaterialTextures.Add((matIdx, (int)texIndex, (int)layer));
             }
         }
     }
@@ -396,34 +398,44 @@ public static class G1mReader
                 layout = layouts[rs.Attribute];
             if (layout == null) continue;
 
-            // Find POSITION / NORMAL / TEXCOORD semantics
-            Semantic? posSem = null, normSem = null, uvSem = null;
+            // Find POSITION / NORMAL / all TEXCOORD semantics (in order)
+            Semantic? posSem = null, normSem = null;
+            var uvSems = new List<Semantic>();
             foreach (var sem in layout.Semantics)
             {
                 switch (sem.Kind)
                 {
                     case SEM_POSITION: posSem  ??= sem; break;
                     case SEM_NORMAL:   normSem ??= sem; break;
-                    case SEM_TEXCOORD: uvSem   ??= sem; break;
+                    case SEM_TEXCOORD: uvSems.Add(sem); break;
                 }
             }
             if (posSem == null) continue;
 
             int numVerts = (int)rs.NumVertices;
             int vStart   = (int)rs.VertexBufStart;
-            int vs       = vb.VertexSize;
 
             // For multi-stream layouts, semantic.BufferIndex → refs[bufferIndex] → actual VB
-            // We resolve each semantic's VB separately.
             var positions = new Vector3[numVerts];
             var normals   = new Vector3[numVerts];
-            var uvs       = new Vector2[numVerts];
 
             for (int vi = 0; vi < numVerts; vi++)
             {
-                if (posSem  != null) positions[vi] = ReadVec3(data: GetVertexData(vbs, layout, posSem,  rs), vi: vStart + vi, stride: GetStride(vbs, layout, posSem),  offset: posSem.Offset,  dt: posSem.DataType);
-                if (normSem != null) normals  [vi] = ReadVec3(data: GetVertexData(vbs, layout, normSem, rs), vi: vStart + vi, stride: GetStride(vbs, layout, normSem), offset: normSem.Offset, dt: normSem.DataType);
-                if (uvSem   != null) uvs      [vi] = ReadVec2(data: GetVertexData(vbs, layout, uvSem,   rs), vi: vStart + vi, stride: GetStride(vbs, layout, uvSem),   offset: uvSem.Offset,   dt: uvSem.DataType);
+                positions[vi] = ReadVec3(data: GetVertexData(vbs, layout, posSem,  rs), vi: vStart + vi, stride: GetStride(vbs, layout, posSem),  offset: posSem.Offset,  dt: posSem.DataType);
+                if (normSem != null) normals[vi] = ReadVec3(data: GetVertexData(vbs, layout, normSem, rs), vi: vStart + vi, stride: GetStride(vbs, layout, normSem), offset: normSem.Offset, dt: normSem.DataType);
+            }
+
+            // Read each UV channel separately
+            var allUvChannels = new Vector2[uvSems.Count][];
+            for (int ch = 0; ch < uvSems.Count; ch++)
+            {
+                var uvSem     = uvSems[ch];
+                var chUvs     = new Vector2[numVerts];
+                byte[]? uvData = GetVertexData(vbs, layout, uvSem, rs);
+                int uvStride   = GetStride(vbs, layout, uvSem);
+                for (int vi = 0; vi < numVerts; vi++)
+                    chUvs[vi] = ReadVec2(data: uvData, vi: vStart + vi, stride: uvStride, offset: uvSem.Offset, dt: uvSem.DataType);
+                allUvChannels[ch] = chUvs;
             }
 
             // Index buffer
@@ -444,12 +456,13 @@ public static class G1mReader
 
             result.Add(new G1mSubmesh
             {
-                Positions     = positions,
-                Normals       = normals,
-                TexCoords     = uvs,
-                Indices       = indices,
+                Positions    = positions,
+                Normals      = normals,
+                TexCoords    = allUvChannels.Length > 0 ? allUvChannels[0] : [],
+                AllTexCoords = allUvChannels,
+                Indices      = indices,
                 MaterialIndex = rs.Material,
-                MatPalId      = rs.MatPalId,
+                MatPalId     = rs.MatPalId,
             });
         }
         return [.. result];

@@ -27,6 +27,12 @@ public static class KidsObjDbResolver
     private const uint TypeKtidKtid       = 0x8e39aa37;
     private const uint TypeKtidKidsObjDb  = 0x20a6a0bb;
 
+    // G1M IDOK property that contains the object_id of its associated KTID IDOK
+    private const uint PropKtidLink = 0xad260326u;
+
+    // Byte sizes for IDOK property value types (index = type id; 0-2 and unknown → 4 as fallback)
+    private static readonly int[] PropTypeSizes = [4, 4, 4, 1, 2, 4, 8, 1, 4, 8, 4, 4];
+
     private static readonly byte[] IdokMagic = "IDOK0000"u8.ToArray();
     private static readonly byte[] DokMagic  = "_DOK0000"u8.ToArray();
 
@@ -73,9 +79,11 @@ public static class KidsObjDbResolver
                     if (hdrSize >= data.Length) continue;
 
                     // Parse all IDOK records
-                    var objIdToG1t  = new Dictionary<uint, AssetItemViewModel>();
-                    var ktidFileFks = new List<uint>();
-                    var g1mFks      = new List<uint>();
+                    var objIdToG1t    = new Dictionary<uint, AssetItemViewModel>();
+                    var objIdToKtidFk = new Dictionary<uint, uint>();  // ktid_oid -> ktid_fk
+                    var g1mToKtidOid  = new Dictionary<uint, uint>();  // g1m_fk   -> ktid_oid
+                    var ktidFileFks   = new List<uint>();               // fallback list
+                    var g1mFks        = new List<uint>();
 
                     int pos = hdrSize;
                     while (pos + 16 <= data.Length)
@@ -102,11 +110,22 @@ public static class KidsObjDbResolver
                         {
                             uint refFk = ReadU32(data, refOffset);
                             if (g1tMap.TryGetValue(refFk, out var g1tVm))
+                            {
                                 objIdToG1t[objectId] = g1tVm;
+                            }
                             else if (ktidMap.ContainsKey(refFk))
+                            {
                                 ktidFileFks.Add(refFk);
+                                objIdToKtidFk[objectId] = refFk;
+                            }
                             else if (g1mMap.ContainsKey(refFk))
+                            {
                                 g1mFks.Add(refFk);
+                                // Read prop PropKtidLink to find the associated KTID's object_id
+                                uint? ktidOid = ReadPropValue(data, pos, numProps, refOffset, PropKtidLink);
+                                if (ktidOid.HasValue)
+                                    g1mToKtidOid[refFk] = ktidOid.Value;
+                            }
                         }
 
                         int advance = recSize >= 8 ? recSize : 8;
@@ -115,65 +134,63 @@ public static class KidsObjDbResolver
 
                     if (g1mFks.Count == 0) goto fallback;
 
-                    // Attempt chain-based mapping via KTID file
-                    if (ktidFileFks.Count > 0 && objIdToG1t.Count > 0)
+                    // Attempt per-G1M KTID chain mapping
+                    if (objIdToG1t.Count > 0)
                     {
-                        // Parse the KTID texture binding table
-                        uint ktidFk = ktidFileFks[0];
-                        if (!ktidMap.TryGetValue(ktidFk, out var ktidVm)) goto fallback;
-
-                        byte[] ktidData;
-                        try { ktidData = extractor.ExtractToMemory(ktidVm.Record, ktidVm.Container); }
-                        catch { goto fallback; }
-
-                        // KTID file format: [(u32 slot_index, u32 object_id), ...]
-                        var slotToObjId = new Dictionary<int, uint>();
-                        for (int i = 0; i + 7 < ktidData.Length; i += 8)
-                        {
-                            int  slot  = (int)ReadU32(ktidData, i);
-                            uint objId = ReadU32(ktidData, i + 4);
-                            slotToObjId[slot] = objId;
-                        }
-
-                        if (slotToObjId.Count == 0) goto fallback;
-
-                        int maxSlot = 0;
-                        foreach (int s in slotToObjId.Keys)
-                            if (s > maxSlot) maxSlot = s;
-
-                        var orderedG1ts = new AssetItemViewModel?[maxSlot + 1];
                         bool anyMapped = false;
-                        for (int s = 0; s <= maxSlot; s++)
+                        foreach (uint g1mFk in g1mFks)
                         {
-                            if (slotToObjId.TryGetValue(s, out uint oid) &&
-                                objIdToG1t.TryGetValue(oid, out var vm))
+                            // Resolve KTID: prefer per-G1M property link, fall back to first KTID
+                            uint ktidFk = 0;
+                            if (g1mToKtidOid.TryGetValue(g1mFk, out uint ktidOid) &&
+                                objIdToKtidFk.TryGetValue(ktidOid, out uint resolvedFk))
+                                ktidFk = resolvedFk;
+                            else if (ktidFileFks.Count > 0)
+                                ktidFk = ktidFileFks[0];
+
+                            if (ktidFk == 0 || !ktidMap.TryGetValue(ktidFk, out var ktidVm)) continue;
+
+                            byte[] ktidData;
+                            try { ktidData = extractor.ExtractToMemory(ktidVm.Record, ktidVm.Container); }
+                            catch { continue; }
+
+                            // KTID file format: [(u32 slot_index, u32 object_id), ...]
+                            var slotToObjId = new Dictionary<int, uint>();
+                            for (int i = 0; i + 7 < ktidData.Length; i += 8)
                             {
-                                orderedG1ts[s] = vm;
-                                anyMapped = true;
+                                int  slot  = (int)ReadU32(ktidData, i);
+                                uint objId = ReadU32(ktidData, i + 4);
+                                slotToObjId[slot] = objId;
                             }
-                        }
+                            if (slotToObjId.Count == 0) continue;
 
-                        if (anyMapped)
-                        {
-                            // Build compact list preserving slot-index positions
-                            // (null slots become null entries, trimmed at end)
-                            var list = orderedG1ts
-                                .Select(v => v ?? default!)
-                                .ToList();
+                            int maxSlot = 0;
+                            foreach (int s in slotToObjId.Keys)
+                                if (s > maxSlot) maxSlot = s;
 
-                            // Remove trailing nulls
+                            var orderedG1ts = new AssetItemViewModel?[maxSlot + 1];
+                            bool anySlotMapped = false;
+                            for (int s = 0; s <= maxSlot; s++)
+                            {
+                                if (slotToObjId.TryGetValue(s, out uint oid) &&
+                                    objIdToG1t.TryGetValue(oid, out var vm))
+                                {
+                                    orderedG1ts[s] = vm;
+                                    anySlotMapped = true;
+                                }
+                            }
+                            if (!anySlotMapped) continue;
+
+                            var list = orderedG1ts.Select(v => v ?? default!).ToList();
                             while (list.Count > 0 && list[^1] is null) list.RemoveAt(list.Count - 1);
 
                             if (list.Count > 0)
                             {
-                                lock (result)
-                                {
-                                    foreach (uint g1mFk in g1mFks)
-                                        result[g1mFk] = list.AsReadOnly();
-                                }
-                                goto nextFile;
+                                lock (result) result[g1mFk] = list.AsReadOnly();
+                                anyMapped = true;
                             }
                         }
+                        if (anyMapped) goto nextFile;
                     }
 
                     fallback:
@@ -253,6 +270,31 @@ public static class KidsObjDbResolver
             if (found) return i;
         }
         return -1;
+    }
+
+    /// <summary>
+    /// Reads a single u32 property value from an IDOK record by matching <paramref name="targetHash"/>.
+    /// Returns null if the property is absent or cannot be read.
+    /// </summary>
+    private static uint? ReadPropValue(byte[] data, int recordStart, int numProps, int refFkOffset, uint targetHash)
+    {
+        int valPos = refFkOffset + 4;  // property values start after ref_fk
+        for (int i = 0; i < numProps; i++)
+        {
+            int doff = recordStart + 0x18 + i * 12;
+            if (doff + 12 > data.Length) break;
+            uint propType  = ReadU32(data, doff + 0);
+            uint propCount = ReadU32(data, doff + 4);
+            uint propHash  = ReadU32(data, doff + 8);
+            int  typeSize  = propType < (uint)PropTypeSizes.Length ? PropTypeSizes[propType] : 4;
+            int  valBytes  = (int)(propCount * typeSize);
+
+            if (propHash == targetHash && propCount == 1 && typeSize == 4 && valPos + 4 <= data.Length)
+                return ReadU32(data, valPos);
+
+            valPos += valBytes;
+        }
+        return null;
     }
 
     private static uint ReadU32(byte[] b, int o) =>
