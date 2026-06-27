@@ -1,5 +1,6 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using KissakiViewer.Core;
+using KissakiViewer.Core.Formats;
 
 namespace KissakiViewer.ViewModels;
 
@@ -26,10 +27,18 @@ public sealed partial class AssetItemViewModel : ObservableObject
     // "kasumi_body.g1m" or "0x1234abcd.g1m"
     public string DisplayFileName => DisplayName + TypeExt;
 
-    // "character/kasumi" — empty string if no recovered name or no folder
-    public string FolderPath => RecoveredName != null
-        ? GetFolderPart(RecoveredName)
-        : string.Empty;
+    // "character/kasumi" — TypeKtid category if no recovered name with path
+    // Note: embedded paths may use backslashes (Windows-style); check both separators
+    public string FolderPath
+    {
+        get
+        {
+            if (RecoveredName is null) return KtidExtension.GetCategory(Record.TypeKtid);
+            string normalized = RecoveredName.Replace('\\', '/');
+            int sep = normalized.LastIndexOf('/');
+            return sep > 0 ? normalized[..sep] : KtidExtension.GetCategory(Record.TypeKtid);
+        }
+    }
 
     [ObservableProperty]
     private bool _isSelected;
@@ -45,13 +54,6 @@ public sealed partial class AssetItemViewModel : ObservableObject
         path = path.Replace('\\', '/');
         int i = path.LastIndexOf('/');
         return i >= 0 ? path[(i + 1)..] : path;
-    }
-
-    private static string GetFolderPart(string path)
-    {
-        path = path.Replace('\\', '/');
-        int i = path.LastIndexOf('/');
-        return i > 0 ? path[..i] : string.Empty;
     }
 
     private static string FormatSize(ulong bytes) => bytes switch

@@ -3,6 +3,7 @@ using BCnEncoder.Shared;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using System.IO;
+using System.IO.Compression;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -14,6 +15,11 @@ namespace KissakiViewer.Core.Formats;
 /// </summary>
 public static class G1tDecoder
 {
+    // ── EX_SWIZZLE_TYPE constants ─────────────────────────────────────────────
+    private const byte EX_SWIZZLE_NONE      = 0x00;
+    private const byte EX_SWIZZLE_DX12_64KB = 0x01;
+    private const byte EX_SWIZZLE_ZLIB      = 0x03;
+
     // ── Format code table ────────────────────────────────────────────────────
 
     private enum FmtKind { Unknown, Uncompressed, BCn }
@@ -23,14 +29,23 @@ public static class G1tDecoder
 
     private static readonly Dictionary<byte, FmtDesc> s_fmtMap = new()
     {
+        // ── DOA6 probe-derived uncompressed ───────────────────────────────────
         [0x01] = new(FmtKind.Uncompressed, default, 4, "RGBA8_UNORM"),
         [0x02] = new(FmtKind.Uncompressed, default, 4, "BGRA8_UNORM"),
         [0x03] = new(FmtKind.Uncompressed, default, 8, "RGBA16_UNORM"),
         [0x04] = new(FmtKind.Uncompressed, default, 1, "R8_UNORM"),
+        // ── RDBExplorer-derived uncompressed (non-conflicting) ────────────────
+        [0x09] = new(FmtKind.Uncompressed, default, 4, "RGBA8_0x09"),
+        [0x0A] = new(FmtKind.Uncompressed, default, 4, "BGRA8_0x0A"),
+        [0x0C] = new(FmtKind.Uncompressed, default, 8, "RGBA16F_0x0C"),
+        [0x67] = new(FmtKind.Uncompressed, default, 4, "RGBA8_0x67"),
+        [0x74] = new(FmtKind.Uncompressed, default, 4, "RGBA8_0x74"),
+        // ── BCn — DOA6 probe ──────────────────────────────────────────────────
         [0x22] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0x22"),
         [0x3C] = new(FmtKind.BCn, CompressionFormat.Bc1,  0, "BC1_SRGB"),
         [0x3D] = new(FmtKind.BCn, CompressionFormat.Bc2,  0, "BC2_SRGB"),
         [0x3E] = new(FmtKind.BCn, CompressionFormat.Bc3,  0, "BC3_SRGB"),
+        [0x4C] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0x4C"),
         [0x54] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0x54"),
         [0x59] = new(FmtKind.BCn, CompressionFormat.Bc1,  0, "BC1_UNORM"),
         [0x5A] = new(FmtKind.BCn, CompressionFormat.Bc2,  0, "BC2_UNORM"),
@@ -39,9 +54,23 @@ public static class G1tDecoder
         [0x5D] = new(FmtKind.BCn, CompressionFormat.Bc5,  0, "BC5_UNORM"),
         [0x5E] = new(FmtKind.BCn, CompressionFormat.Bc6U, 0, "BC6H_UF16"),
         [0x5F] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_UNORM"),
-        [0x4C] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0x4C"),
         [0xF9] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0xF9"),
         [0xFC] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0xFC"),
+        // ── BCn — older KatanaEngine range (0x06-0x12) ────────────────────────
+        [0x06] = new(FmtKind.BCn, CompressionFormat.Bc1,  0, "BC1_0x06"),
+        [0x07] = new(FmtKind.BCn, CompressionFormat.Bc2,  0, "BC2_0x07"),
+        [0x08] = new(FmtKind.BCn, CompressionFormat.Bc3,  0, "BC3_0x08"),
+        [0x10] = new(FmtKind.BCn, CompressionFormat.Bc1,  0, "BC1_0x10"),
+        [0x11] = new(FmtKind.BCn, CompressionFormat.Bc2,  0, "BC2_0x11"),
+        [0x12] = new(FmtKind.BCn, CompressionFormat.Bc3,  0, "BC3_0x12"),
+        // ── BCn — 0x60-0x66 aliases (newer platform codes) ───────────────────
+        [0x60] = new(FmtKind.BCn, CompressionFormat.Bc1,  0, "BC1_0x60"),
+        [0x61] = new(FmtKind.BCn, CompressionFormat.Bc2,  0, "BC2_0x61"),
+        [0x62] = new(FmtKind.BCn, CompressionFormat.Bc3,  0, "BC3_0x62"),
+        [0x63] = new(FmtKind.BCn, CompressionFormat.Bc4,  0, "BC4_0x63"),
+        [0x64] = new(FmtKind.BCn, CompressionFormat.Bc5,  0, "BC5_0x64"),
+        [0x65] = new(FmtKind.BCn, CompressionFormat.Bc6U, 0, "BC6H_0x65"),
+        [0x66] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0x66"),
     };
 
     public static string GetFormatName(byte code) =>
@@ -94,22 +123,45 @@ public static class G1tDecoder
 
             uint mipCount = (uint)((byte0 >> 4) & 0xF);
             if (mipCount == 0) mipCount = 1;
-            uint w = 1u << ((dim >> 4) & 0xF);
-            uint h = 1u << (dim & 0xF);
+            // dim byte layout: (log2_height << 4) | log2_width  — upper nibble = height, lower = width
+            uint w = 1u << (dim & 0xF);
+            uint h = 1u << ((dim >> 4) & 0xF);
 
-            // Format 0x4C encodes square textures as w = h = 1 << ((dim >> 4) - 1).
-            // The standard formula produces 4096×2 from dim=0xC1; the actual size is 2048×2048.
+            // Format 0x4C encodes square textures: actual side = 1 << (upper_nibble - 1).
+            // e.g. dim=0xC1 → standard gives 4096h×2w; actual is 2048×2048.
             if (fmtCode == 0x4C && ((dim >> 4) & 0xF) > 0)
             {
                 uint side = 1u << (((dim >> 4) & 0xF) - 1);
                 w = h = side;
             }
 
-            uint extSize = 0;
+            uint extSize      = 0;
+            byte exSwizzleType = EX_SWIZZLE_NONE;
             if (fmtCode != 0)
             {
                 extSize = ReadU32(data, ep + 8);
                 if (extSize > 0x400) extSize = 0x0C;
+
+                // ExtraHeaderRaw layout (offsets relative to ep+8):
+                //   [0..3]  = extSize itself
+                //   [4..7]  = ZScale
+                //   [8..9]  = exInfo (faces | array<<4)
+                //   [10]    = EX_SwizzleType
+                //   [12..15]= Width override  (if extSize >= 0x10)
+                //   [16..19]= Height override (if extSize >= 0x14)
+                if (extSize >= 0x0C && ep + 18 < data.Length)
+                    exSwizzleType = data[ep + 18];
+
+                if (extSize >= 0x10 && ep + 20 + 4 <= data.Length)
+                {
+                    uint ow = ReadU32(data, ep + 20);
+                    if (ow > 0) w = ow;
+                }
+                if (extSize >= 0x14 && ep + 24 + 4 <= data.Length)
+                {
+                    uint oh = ReadU32(data, ep + 24);
+                    if (oh > 0) h = oh;
+                }
             }
 
             int pixStart = ep + 8 + (int)extSize;
@@ -117,10 +169,10 @@ public static class G1tDecoder
             bool fmtKnown = s_fmtMap.TryGetValue(fmtCode, out var fd);
             if (sequential && fmtCode == 0)
                 nextEp = ep + 8; // null/placeholder slot — fixed 8-byte header, no pixel data
-            else if (sequential && fmtKnown)
+            else if (sequential && fmtKnown && exSwizzleType != EX_SWIZZLE_ZLIB)
                 nextEp = pixStart + ComputeMipChainSize(fd!, w, h, mipCount);
 
-            AppLogger.Info($"  G1T[{i}] ep=0x{ep:x} fmt=0x{fmtCode:x2}({GetFormatName(fmtCode)}) {w}x{h} mips={mipCount} extSize={extSize} pixStart=0x{pixStart:x}" +
+            AppLogger.Info($"  G1T[{i}] ep=0x{ep:x} fmt=0x{fmtCode:x2}({GetFormatName(fmtCode)}) {w}x{h} mips={mipCount} extSize={extSize} swizzle=0x{exSwizzleType:x2} pixStart=0x{pixStart:x}" +
                            (sequential ? $" nextEp=0x{nextEp:x}" : ""));
 
             // Dump first 32 bytes at pixStart to help identify unknown formats
@@ -133,12 +185,15 @@ public static class G1tDecoder
             }
 
             texInfos.Add(new G1TTexInfo((int)i, fmtCode, w, h, mipCount, extSize,
-                                        GetFormatName(fmtCode), pixStart));
+                                        GetFormatName(fmtCode), pixStart, exSwizzleType));
 
-            // In sequential mode, if format is unknown we can't advance nextEp → stop
-            if (sequential && fmtCode != 0 && !fmtKnown)
+            // In sequential mode, stop if format unknown or ZLIB-compressed (can't compute next offset)
+            if (sequential && fmtCode != 0 && (!fmtKnown || exSwizzleType == EX_SWIZZLE_ZLIB))
             {
-                AppLogger.Warn($"  G1T sequential: unknown fmt=0x{fmtCode:x2} at slot {i}, cannot compute mip size → stopping");
+                if (!fmtKnown)
+                    AppLogger.Warn($"  G1T sequential: unknown fmt=0x{fmtCode:x2} at slot {i}, cannot compute mip size → stopping");
+                else
+                    AppLogger.Warn($"  G1T sequential: ZLIB-compressed at slot {i}, cannot compute sequential size → stopping");
                 break;
             }
         }
@@ -165,16 +220,40 @@ public static class G1tDecoder
             if (t.FmtCode == 0) continue;
             if (!s_fmtMap.TryGetValue(t.FmtCode, out var fd)) continue;
 
-            int pixStart = t.PixelStart;
-            int pixSize  = ComputeBlockSize(fd, t.Width, t.Height);
-            if (pixSize == 0 || pixStart + pixSize > data.Length) continue;
+            // Resolve the raw pixel bytes, handling ZLIB decompression
+            byte[] srcData;
+            int    srcOffset;
 
-            var pixData = new ReadOnlyMemory<byte>(data, pixStart, pixSize);
+            if (t.ExSwizzleType == EX_SWIZZLE_ZLIB)
+            {
+                srcData   = DecompressZlibTexture(data, t.PixelStart);
+                srcOffset = 0;
+                if (srcData.Length == 0) continue;
+            }
+            else
+            {
+                srcData   = data;
+                srcOffset = t.PixelStart;
+            }
+
+            int pixSize = ComputeBlockSize(fd, t.Width, t.Height);
+            if (pixSize == 0 || srcOffset + pixSize > srcData.Length) continue;
+
+            // DX12 64KB tile deswizzle (needed for newer platform assets)
+            if (t.ExSwizzleType == EX_SWIZZLE_DX12_64KB && fd.Kind == FmtKind.BCn && pixSize > 65536)
+            {
+                byte[] tile = new byte[pixSize];
+                Array.Copy(srcData, srcOffset, tile, 0, pixSize);
+                srcData   = DeswizzleD3D12_64KB(tile, t.Width, t.Height, fd);
+                srcOffset = 0;
+            }
+
+            var pixData = new ReadOnlyMemory<byte>(srcData, srcOffset, pixSize);
 
             Image<Rgba32>? img = fd.Kind switch
             {
                 FmtKind.BCn          => DecodeBCn(decoder, pixData, t, fd),
-                FmtKind.Uncompressed => DecodeUncompressed(data, pixStart, t, fd),
+                FmtKind.Uncompressed => DecodeUncompressed(srcData, srcOffset, t, fd),
                 _                    => null,
             };
 
@@ -277,9 +356,9 @@ public static class G1tDecoder
                     ColorRgba32 c = px[i];
                     row[x] = code switch
                     {
-                        0x5C => new Rgba32(c.r, c.r, c.r, 255),
-                        0x5D => ReconstructNormal(c),
-                        _    => new Rgba32(c.r, c.g, c.b, c.a),
+                        0x5C or 0x63 => new Rgba32(c.r, c.r, c.r, 255), // BC4 variants → grayscale
+                        0x5D or 0x64 => ReconstructNormal(c),            // BC5 variants → normal map
+                        _            => new Rgba32(c.r, c.g, c.b, c.a),
                     };
                 }
             }
@@ -319,9 +398,12 @@ public static class G1tDecoder
                     int o = pixStart + i * fd.BytesPerPixel;
                     row[x] = t.FmtCode switch
                     {
-                        0x01 => new Rgba32(data[o], data[o+1], data[o+2], data[o+3]),        // RGBA8
-                        0x02 => new Rgba32(data[o+2], data[o+1], data[o], data[o+3]),        // BGRA8→RGBA8
-                        0x03 => new Rgba32(data[o], data[o+2], data[o+4], data[o+6]),        // RGBA16→8 (high byte)
+                        0x01 or 0x09 or 0x67 or 0x74
+                             => new Rgba32(data[o], data[o+1], data[o+2], data[o+3]),        // RGBA8
+                        0x02 or 0x0A
+                             => new Rgba32(data[o+2], data[o+1], data[o], data[o+3]),        // BGRA8→RGBA8
+                        0x03 or 0x0C
+                             => new Rgba32(data[o], data[o+2], data[o+4], data[o+6]),        // RGBA16/16F→8 (high byte)
                         0x04 => new Rgba32(data[o], data[o], data[o], 255),                  // R8→gray
                         _    => new Rgba32(0, 0, 0, 255),
                     };
@@ -330,6 +412,133 @@ public static class G1tDecoder
         });
 
         return img;
+    }
+
+    // ── ZLIB texture decompression ───────────────────────────────────────────
+
+    /// <summary>
+    /// Decompresses a ZLIB_COMPRESSED texture block (EX_SWIZZLE_TYPE = 0x03).
+    /// Format: custom chunk table header followed by individually-zlib-compressed windows.
+    /// </summary>
+    private static byte[] DecompressZlibTexture(byte[] data, int startPos)
+    {
+        try
+        {
+            using var ms = new MemoryStream(data, startPos, data.Length - startPos, writable: false);
+            using var br = new BinaryReader(ms);
+
+            br.ReadBytes(4);            // magic
+            br.ReadInt32();             // tableSize
+            br.ReadInt32();             // unk
+            int windowSize     = br.ReadInt32();
+            int meta1Count     = br.ReadInt32();
+            int chunkCount     = br.ReadInt32();
+            int meta2Count     = br.ReadInt32();
+            int hasUncompChunk = br.ReadInt32();
+            int uncompChunkSz  = br.ReadInt32();
+
+            // skip meta tables (16 bytes per entry)
+            br.ReadBytes(meta1Count * 16);
+            br.ReadBytes(meta2Count * 16);
+
+            var chunkTable = new (int offset, int size)[chunkCount];
+            for (int j = 0; j < chunkCount; j++)
+                chunkTable[j] = (br.ReadInt32(), br.ReadInt32());
+
+            (int offset, int size) uncompInfo = (0, 0);
+            if (hasUncompChunk > 0)
+                uncompInfo = (br.ReadInt32(), br.ReadInt32());
+
+            int totalSize = chunkCount * windowSize + (hasUncompChunk > 0 ? uncompChunkSz : 0);
+            byte[] result = new byte[totalSize];
+
+            for (int j = 0; j < chunkCount; j++)
+            {
+                ms.Position = chunkTable[j].offset - startPos;
+                uint compSize     = br.ReadUInt32();
+                byte[] compressed = br.ReadBytes((int)compSize);
+
+                using var csMs = new MemoryStream(compressed);
+                using var zs   = new ZLibStream(csMs, CompressionMode.Decompress);
+                using var tmp  = new MemoryStream();
+                zs.CopyTo(tmp);
+                byte[] dec   = tmp.ToArray();
+                int toCopy   = Math.Min(dec.Length, windowSize);
+                Array.Copy(dec, 0, result, j * windowSize, toCopy);
+            }
+
+            if (hasUncompChunk > 0)
+            {
+                ms.Position = uncompInfo.offset - startPos;
+                byte[] last = br.ReadBytes(uncompChunkSz);
+                int finalOff = chunkCount * windowSize;
+                int toCopy   = Math.Min(last.Length, result.Length - finalOff);
+                Array.Copy(last, 0, result, finalOff, toCopy);
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Exception("G1T ZLIB decompress failed", ex);
+            return [];
+        }
+    }
+
+    // ── D3D12 64KB tile deswizzle ────────────────────────────────────────────
+
+    /// <summary>Deswizzles D3D12 64KB-tiled BCn data into linear row-major layout.</summary>
+    private static byte[] DeswizzleD3D12_64KB(byte[] src, uint width, uint height, FmtDesc fd)
+    {
+        int bytesPerBlock = fd.BCnFmt switch
+        {
+            CompressionFormat.Bc1 or CompressionFormat.Bc4 => 8,
+            _ => 16,
+        };
+        if (bytesPerBlock == 0) return src;
+
+        uint blockW = (width  + 3) / 4;
+        uint blockH = (height + 3) / 4;
+
+        byte[] dst = new byte[src.Length];
+
+        const uint TileBytes    = 64 * 1024;
+        const uint TileRowBytes = 1024;
+        uint tileWidth  = TileRowBytes / (uint)bytesPerBlock;
+        const uint TileHeight = 64;
+
+        uint tilesX = (blockW + tileWidth  - 1) / tileWidth;
+        uint tilesY = (blockH + TileHeight - 1) / TileHeight;
+
+        for (uint ty = 0; ty < tilesY; ty++)
+        {
+            for (uint tx = 0; tx < tilesX; tx++)
+            {
+                uint tileBase = (ty * tilesX + tx) * TileBytes;
+                for (uint row = 0; row < TileHeight; row++)
+                {
+                    uint y = ty * TileHeight + row;
+                    if (y >= blockH) continue;
+
+                    uint srcRow  = tileBase + row * TileRowBytes;
+                    uint dstRow  = y * blockW * (uint)bytesPerBlock;
+                    uint xOffset = tx * tileWidth;
+                    if (xOffset >= blockW) continue;
+
+                    uint copyBlocks = Math.Min(tileWidth, blockW - xOffset);
+                    uint copyBytes  = copyBlocks * (uint)bytesPerBlock;
+
+                    if (srcRow + copyBytes <= src.Length &&
+                        dstRow + xOffset * bytesPerBlock + copyBytes <= dst.Length)
+                    {
+                        Array.Copy(src, (int)srcRow,
+                                   dst, (int)(dstRow + xOffset * (uint)bytesPerBlock),
+                                   (int)copyBytes);
+                    }
+                }
+            }
+        }
+        return dst;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -374,6 +583,7 @@ public static class G1tDecoder
 // ── Data records ─────────────────────────────────────────────────────────────
 
 public record G1TTexInfo(int Slot, byte FmtCode, uint Width, uint Height,
-                         uint MipCount, uint ExtSize, string FmtName, int PixelStart);
+                         uint MipCount, uint ExtSize, string FmtName, int PixelStart,
+                         byte ExSwizzleType = 0);
 
 public record G1TFileInfo(bool Valid, string Version, uint TexCount, G1TTexInfo[] Textures);

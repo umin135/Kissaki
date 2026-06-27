@@ -2,9 +2,8 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using KissakiViewer.Core;
 using KissakiViewer.Core.Formats;
-using KissakiViewer.Core.NameRecovery;
 using KissakiViewer.Models;
-using Ookii.Dialogs.Wpf;
+using KissakiViewer.Services;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using System.Collections.ObjectModel;
@@ -56,6 +55,12 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool _isGridView;
 
+    [ObservableProperty]
+    private bool _restoreAssetName = true;
+
+    /// <summary>Live log lines streamed from AppLogger — bound to the console panel.</summary>
+    public ObservableCollection<string> ConsoleLog { get; } = [];
+
     public bool HasAssets     => Assets.Count > 0;
     public bool HasFolderTree => FolderTree.Count > 0;
     public string WindowTitle { get; }
@@ -89,15 +94,25 @@ public sealed partial class MainViewModel : ObservableObject
 
     public MainViewModel(GameProfile profile)
     {
-        _profile   = profile;
+        _profile    = profile;
         WindowTitle = $"Kissaki — {profile.Name} ({profile.GameDirectory})";
+
+        AppLogger.LogAdded += line =>
+            System.Windows.Application.Current?.Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.Background,
+                (Action)(() => ConsoleLog.Add(line)));
     }
 
     // ── Property change reactions ─────────────────────────────────────────────
 
-    partial void OnFilterTextChanged(string value)           => ApplyFilter();
-    partial void OnSelectedTypeFilterChanged(string value)   => ApplyFilter();
+    partial void OnFilterTextChanged(string value)              => ApplyFilter();
+    partial void OnSelectedTypeFilterChanged(string value)      => ApplyFilter();
     partial void OnSelectedFolderNodeChanged(FolderNode? value) => ApplyFilter();
+    partial void OnRestoreAssetNameChanged(bool value)
+    {
+        SelectedFolderNode = null;
+        BuildFolderTree();
+    }
 
     // ── Load ──────────────────────────────────────────────────────────────────
 
@@ -155,10 +170,15 @@ public sealed partial class MainViewModel : ObservableObject
         foreach (var a in Assets) _allAssetsByKtid.TryAdd(a.Record.FileKtid, a);
 
         BuildTypeFilters();
+        AppLogger.Info($"에셋 로드 완료: {Assets.Count:N0}개");
+        StatusText = $"에셋 로드됨 ({Assets.Count:N0}개) — 파일명 복구 중...";
+
+        await RunNameRecoveryAsync();
+
         BuildFolderTree();
         ApplyFilter();
 
-        StatusText   = $"{Assets.Count:N0}개 에셋 로드됨";
+        StatusText   = $"준비 완료: {Assets.Count:N0}개 에셋, {_nameMap.Count:N0}개 파일명 복구";
         IsLoading    = false;
         LoadProgress = 100;
 
@@ -169,71 +189,105 @@ public sealed partial class MainViewModel : ObservableObject
     private async Task BuildG1mMapAsync()
     {
         if (_extractor == null) return;
-        StatusText = "G1M→G1T 매핑 구축 중...";
-        var allAssets = Assets.ToList();
-        _g1mToG1tMap = await KidsObjDbResolver.BuildAsync(allAssets, _extractor,
-            new Progress<(int done, int total)>(p =>
-                Application.Current.Dispatcher.Invoke(() =>
-                    StatusText = $"kidsobjdb 스캔 중... {p.done}/{p.total}")));
-        Application.Current.Dispatcher.Invoke(() =>
-            StatusText = $"G1M→G1T 매핑 완료 ({_g1mToG1tMap.Count:N0}개 G1M 연결)");
+
+        string rdbPath   = Path.Combine(_profile.FdataDir, "root.rdb");
+        string gameDir   = _profile.GameDirectory;
+        var    allAssets = Assets.ToList();
+
+        // Try cache first
+        if (TextureMapCache.TryLoad(gameDir, rdbPath, allAssets, out var cached))
+        {
+            _g1mToG1tMap = cached;
+            AppLogger.Info($"[G1mMap] 캐시 로드: {_g1mToG1tMap.Count:N0}개 G1M 연결");
+            StatusText = $"G1M→G1T 매핑 완료 (캐시, {_g1mToG1tMap.Count:N0}개)";
+            return;
+        }
+
+        StatusText   = "G1M→G1T 매핑 구축 중...";
+        _g1mToG1tMap = await KidsObjDbResolver.BuildAsync(allAssets, _extractor);
+        StatusText   = $"G1M→G1T 매핑 완료 ({_g1mToG1tMap.Count:N0}개 G1M 연결)";
+
+        TextureMapCache.Save(gameDir, rdbPath, _g1mToG1tMap);
     }
 
     // ── Name recovery ─────────────────────────────────────────────────────────
 
+    /// <summary>CSV 파일을 다시 읽어 이름 사전을 갱신한다 (View 메뉴에서 수동 실행).</summary>
     [RelayCommand]
-    private async Task RecoverNamesAsync()
+    private async Task ReloadNamesAsync()
     {
         if (Assets.Count == 0) { StatusText = "먼저 에셋을 로드하세요."; return; }
-
-        var knownKtids = new HashSet<uint>(Assets.Select(a => a.Record.FileKtid));
-        var log     = new List<string>();
-        var results = new Dictionary<uint, string>();
-        var cts     = new CancellationTokenSource();
-
         IsLoading    = true;
         LoadProgress = 0;
-        StatusText   = "파일명 복구 중...";
-
-        await Task.Run(() =>
-        {
-            var bfResults = NameRecoveryScanner.BruteForce(knownKtids, log, cts.Token);
-            foreach (var kv in bfResults) results[kv.Key] = kv.Value;
-            AppLogger.Info($"[NameRecovery] BruteForce: {bfResults.Count}");
-
-            Application.Current.Dispatcher.Invoke(() =>
-            { LoadProgress = 30; StatusText = $"브루트포스 완료 ({bfResults.Count}개) — exe 스캔 중..."; });
-
-            foreach (string exeName in new[] { "DOA6LR.exe", "DOA6.exe", "DOA6_LastRound.exe", "doa6.exe", "DeadOrAlive6.exe" })
-            {
-                string exePath = Path.Combine(_profile.GameDirectory, exeName);
-                if (!File.Exists(exePath)) continue;
-
-                var exeResults = NameRecoveryScanner.ScanNullTerminated(
-                    exePath, knownKtids, log,
-                    new Progress<int>(p => Application.Current.Dispatcher.Invoke(() =>
-                    { LoadProgress = 30 + p * 0.7; StatusText = $"exe 스캔 중... {p}%"; })),
-                    cts.Token);
-
-                foreach (var kv in exeResults) results[kv.Key] = kv.Value;
-                break;
-            }
-            foreach (string line in log) AppLogger.Info(line);
-        }, cts.Token);
-
-        _nameMap = results;
-        foreach (var a in Assets)
-        {
-            if (_nameMap.TryGetValue(a.Record.FileKtid, out string? name))
-                a.RecoveredName = name;
-        }
-
+        await RunNameRecoveryAsync();
         BuildFolderTree();
         ApplyFilter();
-
-        StatusText   = $"파일명 복구 완료: {results.Count}개 / {Assets.Count:N0}개 (로그: {AppLogger.LogPath})";
         IsLoading    = false;
         LoadProgress = 100;
+    }
+
+    /// <summary>이름 사전 CSV 로드 — 시작 시 및 ReloadNamesCommand에서 호출.</summary>
+    private async Task RunNameRecoveryAsync()
+    {
+        if (_extractor == null) return;
+
+        StatusText   = "이름 사전 로드 중...";
+        LoadProgress = 0;
+
+        string appId   = AppIdService.GetAppId(_profile.GameDirectory);
+        string csvPath = NameDictionaryService.GetCsvPath(appId);
+
+        Dictionary<uint, string> names;
+
+        if (File.Exists(csvPath))
+        {
+            // CSV 있음 → 바로 로드
+            names = await Task.Run(() => NameDictionaryService.Load(csvPath));
+            AppLogger.Info($"[NameDictionary] CSV 로드 (AppID={appId}): {names.Count}개");
+        }
+        else
+        {
+            // CSV 없음 → 두 소스로 이름 수집 후 저장
+            var assetsCopy = Assets.ToList();
+            var extractor  = _extractor;
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+
+            names = await Task.Run(() =>
+            {
+                var merged = new Dictionary<uint, string>();
+
+                // 소스 1: G1MX/G1COX/G1P 헤더 내장 경로 (대부분 게임에서 작동)
+                dispatcher?.BeginInvoke(() => StatusText = "이름 수집 중 (G1MX/G1COX/G1P)...");
+                var grabbed = NameGrabberService.Grab(assetsCopy, extractor,
+                    pct => dispatcher?.BeginInvoke(() => LoadProgress = pct / 2));
+                foreach (var kv in grabbed) merged[kv.Key] = kv.Value;
+
+                // 소스 2: .name 데이터베이스 파일 (DLC/온디맨드 콘텐츠, 없어도 무방)
+                dispatcher?.BeginInvoke(() => StatusText = "이름 수집 중 (.name 데이터베이스)...");
+                var fromName = NameBuildService.Build(assetsCopy, extractor,
+                    pct => dispatcher?.BeginInvoke(() => LoadProgress = 50 + pct / 2));
+                foreach (var kv in fromName) merged.TryAdd(kv.Key, kv.Value);
+
+                if (merged.Count > 0)
+                    NameDictionaryService.Save(csvPath, merged);
+
+                return merged;
+            });
+
+            AppLogger.Info($"[NameDictionary] 수집 완료 (AppID={appId}): {names.Count}개 → {csvPath}");
+        }
+
+        _nameMap = names;
+        foreach (var a in Assets)
+            if (_nameMap.TryGetValue(a.Record.FileKtid, out string? n))
+                a.RecoveredName = n;
+
+        LoadProgress = 100;
+        int matched = Assets.Count(a => a.RecoveredName != null);
+        StatusText = names.Count > 0
+            ? $"이름 복구 완료: {names.Count:N0}개 항목 / {matched:N0}개 매칭"
+            : $"이름 사전 없음 (AppID={appId})";
+        AppLogger.Info($"[NameDictionary] {names.Count}개 로드, {matched}개 적용");
     }
 
     // ── Save Model (FBX) ─────────────────────────────────────────────────────
@@ -327,7 +381,7 @@ public sealed partial class MainViewModel : ObservableObject
                             AppLogger.Info($"[SaveModel] Saved texture: {texName}");
 
                             // Map every material that references this slot
-                            foreach (var (matIdx, slot, _) in model.MaterialTextures)
+                            foreach (var (matIdx, slot, _, _) in model.MaterialTextures)
                                 if (slot == globalSlot)
                                     matTexPaths.TryAdd(matIdx, texName);
                         }
@@ -393,35 +447,83 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (SelectedAsset is null || _extractor is null) return;
 
-        var dlg = new VistaFolderBrowserDialog { Description = "저장 폴더 선택", UseDescriptionForTitle = true };
-        if (dlg.ShowDialog() != true) return;
+        var    rec      = SelectedAsset.Record;
+        string cont     = SelectedAsset.Container;
+        string fileName = BuildExportFileName(SelectedAsset);
+        string outDir   = Path.Combine(AppContext.BaseDirectory, "export");
+        string outPath  = Path.Combine(outDir, fileName);
 
-        string outDir = dlg.SelectedPath;
-        string stem   = SelectedAsset.KtidHex;
-        var    rec    = SelectedAsset.Record;
-        string cont   = SelectedAsset.Container;
+        StatusText = $"내보내는 중... {fileName}";
 
-        StatusText = "내보내는 중...";
+        string? err = null;
         await Task.Run(() =>
         {
-            byte[] raw = _extractor.ExtractToMemory(rec, cont);
-            if (raw.Length == 0) { Application.Current.Dispatcher.Invoke(() => StatusText = "추출 실패."); return; }
+            try
+            {
+                byte[] raw = _extractor.ExtractToMemory(rec, cont);
+                if (raw.Length == 0) { err = "빈 데이터 (추출 실패)"; return; }
 
-            if (rec.TypeExt == ".g1t")
-            {
-                int n = G1tDecoder.SaveAllAsPng(raw, outDir, stem);
-                Application.Current.Dispatcher.Invoke(() => StatusText = $"{n}개 PNG 저장 완료 → {outDir}");
+                Directory.CreateDirectory(outDir);
+                File.WriteAllBytes(outPath, raw);
+                AppLogger.Info($"[Export] {outPath} ({raw.Length:N0} bytes)");
             }
-            else
+            catch (Exception ex)
             {
-                string path = Path.Combine(outDir, $"{stem}{rec.TypeExt}");
-                File.WriteAllBytes(path, raw);
-                Application.Current.Dispatcher.Invoke(() => StatusText = $"저장 완료 → {path}");
+                err = ex.Message;
+                AppLogger.Error($"[Export] {ex.Message}");
             }
         });
+
+        StatusText = err is null
+            ? $"저장 완료 → {outPath}"
+            : $"내보내기 실패: {err}";
+    }
+
+    private static string BuildExportFileName(AssetItemViewModel vm)
+    {
+        string ext = vm.Record.TypeExt;
+
+        // Use recovered name stem when available, sanitised for filesystem use
+        if (vm.RecoveredName is { Length: > 0 } rn)
+        {
+            string stem = rn
+                .Replace('/', '_')
+                .Replace('\\', '_')
+                .Trim('_');
+            // Strip surrounding bracket wrappers like CE1Resource...[name]
+            int lb = stem.LastIndexOf('[');
+            int rb = stem.LastIndexOf(']');
+            if (lb >= 0 && rb > lb)
+                stem = stem[(lb + 1)..rb];
+
+            return stem + ext;
+        }
+
+        return vm.KtidHex + ext;
     }
 
     // ── Folder tree ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the folder path used for tree building and filtering.
+    /// RestoreAssetName=true  → "Content/path" or "Content (Unrecovered)/category"
+    /// RestoreAssetName=false → flat category only
+    /// </summary>
+    private string GetEffectiveFolderPath(AssetItemViewModel asset)
+    {
+        if (!_restoreAssetName)
+            return KtidExtension.GetCategory(asset.Record.TypeKtid);
+
+        if (asset.RecoveredName is { } rn)
+        {
+            string normalized = rn.Replace('\\', '/');
+            int sep = normalized.LastIndexOf('/');
+            string sub = sep > 0 ? normalized[..sep] : string.Empty;
+            return string.IsNullOrEmpty(sub) ? "Content" : "Content/" + sub;
+        }
+
+        return "Content (Unrecovered)/" + KtidExtension.GetCategory(asset.Record.TypeKtid);
+    }
 
     private void BuildFolderTree()
     {
@@ -430,23 +532,34 @@ public sealed partial class MainViewModel : ObservableObject
 
         foreach (var asset in Assets)
         {
-            string? folderPath = asset.FolderPath;
+            string folderPath = GetEffectiveFolderPath(asset);
             if (string.IsNullOrEmpty(folderPath)) continue;
 
             EnsurePath(folderPath, nodeMap, roots);
         }
 
-        int unknownCount = Assets.Count(a => string.IsNullOrEmpty(a.FolderPath));
+        int unknownCount = Assets.Count(a => string.IsNullOrEmpty(GetEffectiveFolderPath(a)));
         if (unknownCount > 0)
         {
             var unknown = new FolderNode("Unknown", string.Empty, isUnknown: true) { AssetCount = unknownCount };
             roots.Add(unknown);
         }
 
+        // Sort roots: alphabetical, Misc last, Unknown last
+        roots.Sort((a, b) =>
+        {
+            if (a.IsUnknown != b.IsUnknown) return a.IsUnknown ? 1 : -1;
+            bool aM = a.Name.Equals("Misc", StringComparison.OrdinalIgnoreCase);
+            bool bM = b.Name.Equals("Misc", StringComparison.OrdinalIgnoreCase);
+            if (aM != bM) return aM ? 1 : -1;
+            return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+        });
+        foreach (var root in roots) SortChildrenRecursive(root);
+
         FolderTree = new ObservableCollection<FolderNode>(roots);
 
-        // Default selection: Unknown or first node
-        SelectedFolderNode ??= roots.LastOrDefault();
+        // Default selection: first node
+        SelectedFolderNode ??= roots.FirstOrDefault();
     }
 
     private static FolderNode EnsurePath(string path,
@@ -474,6 +587,14 @@ public sealed partial class MainViewModel : ObservableObject
         return node;
     }
 
+    private static void SortChildrenRecursive(FolderNode node)
+    {
+        var sorted = node.Children.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        node.Children.Clear();
+        foreach (var child in sorted) node.Children.Add(child);
+        foreach (var child in node.Children) SortChildrenRecursive(child);
+    }
+
     // ── Filter ────────────────────────────────────────────────────────────────
 
     private void ApplyFilter()
@@ -484,9 +605,9 @@ public sealed partial class MainViewModel : ObservableObject
         IEnumerable<AssetItemViewModel> source = SelectedFolderNode switch
         {
             null                   => Assets,
-            { IsUnknown: true }    => Assets.Where(a => string.IsNullOrEmpty(a.FolderPath)),
+            { IsUnknown: true }    => Assets.Where(a => string.IsNullOrEmpty(GetEffectiveFolderPath(a))),
             FolderNode fn          => Assets.Where(a =>
-                a.FolderPath.StartsWith(fn.FullPath, StringComparison.OrdinalIgnoreCase)),
+                GetEffectiveFolderPath(a).StartsWith(fn.FullPath, StringComparison.OrdinalIgnoreCase)),
         };
 
         FilteredAssets = new ObservableCollection<AssetItemViewModel>(

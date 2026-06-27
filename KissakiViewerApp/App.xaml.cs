@@ -18,14 +18,16 @@ public partial class App : Application
         var launcher = new GameLauncherWindow(settings);
         bool selected = launcher.ShowDialog() == true;
 
-        if (!selected || launcher.SelectedGame is null)
+        if (!selected || launcher.LoadedViewModel is null)
         {
             Shutdown();
             return;
         }
 
         ShutdownMode = ShutdownMode.OnLastWindowClose;
-        var main = new MainWindow(launcher.SelectedGame);
+        var main = new MainWindow(launcher.LoadedViewModel);
+        MainWindow = main;   // ensure WPF tracks this as the main window
         main.Show();
+        main.Activate();
     }
 }

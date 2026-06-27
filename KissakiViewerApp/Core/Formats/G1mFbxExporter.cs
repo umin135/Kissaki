@@ -62,7 +62,7 @@ public static class G1mFbxExporter
         if (matCount == 0) matCount = 1;
 
         var matNames = new string[matCount];
-        foreach (var (matIdx, g1tSlot, uvLayer) in model.MaterialTextures)
+        foreach (var (matIdx, g1tSlot, uvLayer, _) in model.MaterialTextures)
             if (matIdx < matCount)
                 matNames[matIdx] = $"Mat{matIdx}_G1T{g1tSlot}_UV{uvLayer}";
 

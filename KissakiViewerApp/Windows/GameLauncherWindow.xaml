@@ -33,9 +33,11 @@
             </StackPanel>
         </Border>
 
-        <!-- Game list -->
-        <ListView Grid.Row="1"
-                  x:Name="GameListView"
+        <!-- Game list / Loading phase (stacked, toggled by Visibility) -->
+        <Grid Grid.Row="1">
+
+        <!-- Game list (shown initially) -->
+        <ListView x:Name="GameListView"
                   ItemsSource="{Binding Games}"
                   SelectedItem="{Binding SelectedGame}"
                   BorderThickness="0"
@@ -97,6 +99,59 @@
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
+
+        <!-- Loading phase panel (shown after Select) -->
+        <Grid x:Name="LoadingPhasePanel" Visibility="Collapsed"
+              Background="{DynamicResource {x:Static adonisUI:Brushes.Layer0BackgroundBrush}}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Log console — bare TextBox with no AdonisUI hover/focus effects -->
+            <TextBox Grid.Row="0"
+                     x:Name="LoadingConsoleTextBox"
+                     IsReadOnly="True"
+                     TextWrapping="NoWrap"
+                     FontFamily="Consolas" FontSize="11"
+                     Foreground="#AAAAAA"
+                     Background="Transparent"
+                     BorderThickness="0"
+                     Padding="12,8"
+                     AcceptsReturn="True"
+                     FocusVisualStyle="{x:Null}"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto">
+                <TextBox.Style>
+                    <Style TargetType="TextBox">
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="TextBox">
+                                    <ScrollViewer x:Name="PART_ContentHost"
+                                                  Focusable="False"
+                                                  Padding="{TemplateBinding Padding}"
+                                                  VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                                                  HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </TextBox.Style>
+            </TextBox>
+
+            <!-- Progress area at bottom -->
+            <StackPanel Grid.Row="1" Margin="12,6,12,10">
+                <TextBlock x:Name="LoadStatusBlock"
+                           FontSize="11" TextWrapping="Wrap"
+                           Foreground="{DynamicResource {x:Static adonisUI:Brushes.ForegroundBrush}}"
+                           Margin="0,0,0,4"/>
+                <ProgressBar x:Name="LoadProgressBar"
+                             Maximum="100" Height="5"
+                             Foreground="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}"/>
+            </StackPanel>
+        </Grid>
+
+        </Grid><!-- end of Row1 container Grid -->
 
         <!-- Status -->
         <Border Grid.Row="2"

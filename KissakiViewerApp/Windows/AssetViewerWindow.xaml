@@ -13,6 +13,16 @@
     <Window.Resources>
         <BooleanToVisibilityConverter         x:Key="BoolToVis"/>
         <conv:InvertBoolToVisibilityConverter x:Key="InvertBoolToVis"/>
+
+        <!-- Plain TextBox template: no AdonisUI hover/focus effects -->
+        <ControlTemplate x:Key="JsonViewerTemplate" TargetType="TextBox">
+            <Border Background="#1a1a1a" SnapsToDevicePixels="True">
+                <ScrollViewer x:Name="PART_ContentHost"
+                              HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Auto"
+                              Padding="12"/>
+            </Border>
+        </ControlTemplate>
     </Window.Resources>
 
     <Grid>
@@ -98,24 +108,67 @@
                            HorizontalAlignment="Center"/>
             </StackPanel>
 
-            <!-- Texture preview -->
+            <!-- Texture preview (PreviewMode.Texture) -->
             <ScrollViewer HorizontalScrollBarVisibility="Auto"
-                          VerticalScrollBarVisibility="Auto"
-                          Visibility="{Binding SelectedTab.PreviewImage, Converter={x:Static conv:NullToVisibilityConverter.Instance},
-                                               FallbackValue=Collapsed}">
+                          VerticalScrollBarVisibility="Auto">
+                <ScrollViewer.Style>
+                    <Style TargetType="ScrollViewer">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                         Value="{x:Static vm:PreviewMode.Texture}">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ScrollViewer.Style>
                 <Image Source="{Binding SelectedTab.PreviewImage}"
                        Stretch="Uniform" Margin="8"
                        RenderOptions.BitmapScalingMode="HighQuality"/>
             </ScrollViewer>
 
-            <!-- 3D model viewport (always present, visibility toggled) -->
+            <!-- JSON / text preview (PreviewMode.Json — KTID, MTL, GRP, …) -->
+            <TextBox Text="{Binding SelectedTab.JsonText, Mode=OneWay}"
+                     IsReadOnly="True"
+                     IsReadOnlyCaretVisible="True"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     Foreground="#dcdcdc"
+                     CaretBrush="#dcdcdc"
+                     SelectionBrush="#c0392b"
+                     TextWrapping="NoWrap"
+                     AcceptsReturn="True"
+                     Template="{StaticResource JsonViewerTemplate}">
+                <TextBox.Style>
+                    <Style TargetType="TextBox">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                         Value="{x:Static vm:PreviewMode.Json}">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </TextBox.Style>
+            </TextBox>
+
+            <!-- 3D model viewport (PreviewMode.Model) -->
             <helix:HelixViewport3D x:Name="Viewport3D"
                                    Background="#111111"
                                    ShowCoordinateSystem="False"
                                    ShowViewCube="True"
-                                   ZoomExtentsWhenLoaded="False"
-                                   Visibility="{Binding SelectedTab.HasModelPreview, Converter={StaticResource BoolToVis},
-                                                        FallbackValue=Collapsed}">
+                                   ZoomExtentsWhenLoaded="False">
+                <helix:HelixViewport3D.Style>
+                    <Style TargetType="helix:HelixViewport3D">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                         Value="{x:Static vm:PreviewMode.Model}">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </helix:HelixViewport3D.Style>
                 <helix:DefaultLights/>
                 <ModelVisual3D x:Name="SceneRoot"/>
             </helix:HelixViewport3D>

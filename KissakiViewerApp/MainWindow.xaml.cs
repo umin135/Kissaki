@@ -11,17 +11,50 @@ public partial class MainWindow : Window
 {
     private readonly MainViewModel _vm;
     private AssetViewerWindow? _viewerWindow;
+    private double _savedConsoleHeight = 160;
 
-    public MainWindow(GameProfile profile)
+    public MainWindow(MainViewModel vm)
     {
         InitializeComponent();
-        _vm = new MainViewModel(profile);
+        _vm = vm;
         DataContext = _vm;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        _ = _vm.LoadAsync();
+        // Populate with log lines already accumulated during the launch load phase
+        foreach (var line in _vm.ConsoleLog)
+            ConsoleTextBox.AppendText(line + "\n");
+        if (_vm.ConsoleLog.Count > 0)
+            ConsoleTextBox.ScrollToEnd();
+
+        // Auto-scroll and append when new lines arrive (e.g. from BuildG1mMapAsync)
+        _vm.ConsoleLog.CollectionChanged += (_, args) =>
+        {
+            if (args.NewItems is not { Count: > 0 }) return;
+            foreach (var item in args.NewItems)
+                ConsoleTextBox.AppendText((string)item + "\n");
+            ConsoleTextBox.ScrollToEnd();
+        };
+    }
+
+    private void ConsoleToggle_Click(object sender, RoutedEventArgs e)
+    {
+        var splitterRow = RootGrid.RowDefinitions[2];
+        var consoleRow  = RootGrid.RowDefinitions[3];
+        if (consoleRow.ActualHeight > 26)
+        {
+            _savedConsoleHeight    = consoleRow.ActualHeight;
+            consoleRow.Height      = new GridLength(26);
+            splitterRow.Height     = new GridLength(0);
+            ConsoleToggleBtn.Content = "▸";
+        }
+        else
+        {
+            consoleRow.Height      = new GridLength(_savedConsoleHeight);
+            splitterRow.Height     = new GridLength(5);
+            ConsoleToggleBtn.Content = "▾";
+        }
     }
 
     private void FolderTreeView_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
@@ -33,7 +66,6 @@ public partial class MainWindow : Window
     {
         var asset = _vm.SelectedAsset;
         if (asset == null || _vm.Extractor == null) return;
-
         OpenInViewer(asset);
     }
 

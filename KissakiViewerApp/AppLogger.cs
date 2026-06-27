@@ -13,6 +13,9 @@ public static class AppLogger
 
     private static readonly object _lock = new();
 
+    /// <summary>Fired on the calling thread whenever a line is written.</summary>
+    public static event Action<string>? LogAdded;
+
     static AppLogger()
     {
         try
@@ -30,8 +33,12 @@ public static class AppLogger
     public static void Exception(string context, Exception ex) =>
         Write("EXC ", $"{context} → {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
 
-    private static void Write(string level, string msg) =>
-        Append($"[{DateTime.Now:HH:mm:ss.fff}] [{level}] {msg}\n");
+    private static void Write(string level, string msg)
+    {
+        string line = $"[{DateTime.Now:HH:mm:ss.fff}] [{level}] {msg}";
+        Append(line + "\n");
+        try { LogAdded?.Invoke(line); } catch { }
+    }
 
     private static void Append(string text)
     {

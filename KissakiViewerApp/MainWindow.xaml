@@ -15,11 +15,13 @@
         <conv:InvertBoolToVisibilityConverter   x:Key="InvertBoolToVis"/>
     </Window.Resources>
 
-    <Grid>
+    <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>       <!-- 0: Menu bar -->
+            <RowDefinition Height="*"/>          <!-- 1: Main content -->
+            <RowDefinition Height="5" x:Name="ConsoleSplitterRow" MinHeight="0"/>  <!-- 2: Splitter -->
+            <RowDefinition Height="160" x:Name="ConsoleRow" MinHeight="26"/>       <!-- 3: Console -->
+            <RowDefinition Height="Auto"/>       <!-- 4: Status bar -->
         </Grid.RowDefinitions>
 
         <!-- Menu bar -->
@@ -29,8 +31,8 @@
               BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}"
               Padding="4,2">
             <MenuItem Header="View">
-                <MenuItem Header="Recover File Names"
-                          Command="{Binding RecoverNamesCommand}"/>
+                <MenuItem Header="이름 CSV 다시 로드"
+                          Command="{Binding ReloadNamesCommand}"/>
             </MenuItem>
             <MenuItem Header="Settings"/>
             <MenuItem Header="Help"/>
@@ -49,6 +51,7 @@
                   Background="{DynamicResource {x:Static adonisUI:Brushes.Layer1BackgroundBrush}}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
@@ -60,7 +63,16 @@
                                Foreground="{DynamicResource {x:Static adonisUI:Brushes.DisabledForegroundBrush}}"/>
                 </Border>
 
-                <TreeView Grid.Row="1"
+                <Border Grid.Row="1" Padding="8,5"
+                        BorderThickness="0,0,0,1"
+                        BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}">
+                    <CheckBox Content="Restore Asset Name"
+                              FontSize="11"
+                              IsChecked="{Binding RestoreAssetName}"
+                              Foreground="{DynamicResource {x:Static adonisUI:Brushes.ForegroundBrush}}"/>
+                </Border>
+
+                <TreeView Grid.Row="2"
                           x:Name="FolderTreeView"
                           ItemsSource="{Binding FolderTree}"
                           BorderThickness="0"
@@ -292,8 +304,78 @@
             </Grid>
         </Grid>
 
+        <!-- Row 2: Console resizer splitter -->
+        <GridSplitter Grid.Row="2"
+                      Height="5" HorizontalAlignment="Stretch"
+                      ResizeDirection="Rows"
+                      Background="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}"
+                      Cursor="SizeNS"/>
+
+        <!-- Row 3: Console panel -->
+        <Grid Grid.Row="3"
+              Background="{DynamicResource {x:Static adonisUI:Brushes.Layer0BackgroundBrush}}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="26"/>  <!-- header (always visible) -->
+                <RowDefinition Height="*"/>   <!-- log content -->
+            </Grid.RowDefinitions>
+
+            <!-- Console header -->
+            <Border Grid.Row="0"
+                    BorderThickness="0,0,0,1"
+                    BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}"
+                    Padding="8,0">
+                <DockPanel>
+                    <Button DockPanel.Dock="Right"
+                            x:Name="ConsoleToggleBtn"
+                            Content="▾"
+                            Click="ConsoleToggle_Click"
+                            Padding="6,0" MinHeight="0" MinWidth="0" Height="22"
+                            FontSize="11"
+                            Background="Transparent" BorderThickness="0"
+                            VerticalAlignment="Center"
+                            Foreground="{DynamicResource {x:Static adonisUI:Brushes.DisabledForegroundBrush}}"
+                            ToolTip="콘솔 접기/펼치기"/>
+                    <TextBlock Text="CONSOLE"
+                               FontSize="10" FontWeight="SemiBold"
+                               Foreground="{DynamicResource {x:Static adonisUI:Brushes.DisabledForegroundBrush}}"
+                               VerticalAlignment="Center"/>
+                </DockPanel>
+            </Border>
+
+            <!-- Log text — bare TextBox with no AdonisUI hover/focus effects -->
+            <TextBox Grid.Row="1"
+                     x:Name="ConsoleTextBox"
+                     IsReadOnly="True"
+                     TextWrapping="NoWrap"
+                     FontFamily="Consolas" FontSize="11"
+                     Foreground="#AAAAAA"
+                     Background="Transparent"
+                     BorderThickness="0"
+                     Padding="8,4"
+                     AcceptsReturn="True"
+                     FocusVisualStyle="{x:Null}"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto">
+                <TextBox.Style>
+                    <Style TargetType="TextBox">
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="TextBox">
+                                    <ScrollViewer x:Name="PART_ContentHost"
+                                                  Focusable="False"
+                                                  Padding="{TemplateBinding Padding}"
+                                                  VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                                                  HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </TextBox.Style>
+            </TextBox>
+        </Grid>
+
         <!-- Status bar -->
-        <Border Grid.Row="2"
+        <Border Grid.Row="4"
                 Background="{DynamicResource {x:Static adonisUI:Brushes.Layer2BackgroundBrush}}"
                 BorderThickness="0,1,0,0"
                 BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}"

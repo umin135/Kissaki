@@ -16,24 +16,22 @@ public sealed class FdataExtractor
 
     private readonly string _fdataDir;
 
+    public string FdataDir => _fdataDir;
+
     public FdataExtractor(string fdataDir) => _fdataDir = fdataDir;
+
+    public bool ContainerExists(string containerName) =>
+        File.Exists(Path.Combine(_fdataDir, containerName));
 
     /// <summary>Decompress asset into memory. Returns empty array on failure.</summary>
     public byte[] ExtractToMemory(AssetRecord rec, string containerName)
     {
-        AppLogger.Info($"Extract: ktid=0x{rec.FileKtid:x8} ext={rec.TypeExt} container={containerName} offset=0x{rec.FdataOffset:x} sizeInCont={rec.SizeInContainer} fileSize={rec.FileSize}");
-
-        if (rec.FileSize == 0)
-        {
-            AppLogger.Warn("  → skipped: FileSize == 0");
-            return [];
-        }
+        if (rec.FileSize == 0) return [];
 
         string fullPath = Path.Combine(_fdataDir, containerName);
         if (!File.Exists(fullPath))
         {
-            AppLogger.Error($"  → fdata file not found: {fullPath}");
-            AppLogger.Info($"  fdataDir={_fdataDir}");
+            AppLogger.Error($"fdata not found: {fullPath}");
             return [];
         }
 
@@ -43,11 +41,7 @@ public sealed class FdataExtractor
             AppLogger.Error($"  → ReadRaw returned null (offset or size out of range)");
             return [];
         }
-        if (raw.Length < IDRK_SIZE)
-        {
-            AppLogger.Error($"  → raw too short: {raw.Length} < {IDRK_SIZE}");
-            return [];
-        }
+        if (raw.Length < IDRK_SIZE) return [];
 
         return ParseAndDecompress(raw);
     }
@@ -82,47 +76,26 @@ public sealed class FdataExtractor
     private byte[] ParseAndDecompress(byte[] raw)
     {
         // Verify IDRK magic
-        if (raw[0] != 'I' || raw[1] != 'D' || raw[2] != 'R' || raw[3] != 'K')
-        {
-            AppLogger.Error($"  → IDRK magic mismatch: [{raw[0]:x2} {raw[1]:x2} {raw[2]:x2} {raw[3]:x2}]");
-            return [];
-        }
+        if (raw[0] != 'I' || raw[1] != 'D' || raw[2] != 'R' || raw[3] != 'K') return [];
 
         long compressedSize   = ReadI64(raw, 0x10);
         long uncompressedSize = ReadI64(raw, 0x18);
 
-        // Dump full IDRK overhead so dependency KTIDs (hidden in bytes 0x58-0x87 for G1M) are visible
-        int overhead = (int)(raw.Length - compressedSize);
-        int dumpLen = Math.Min(overhead, raw.Length);
-        var sb = new System.Text.StringBuilder();
-        for (int i = 0; i < dumpLen; i++)
-        {
-            if (i % 16 == 0) sb.Append($"\n    {i:x3}: ");
-            sb.Append($"{raw[i]:x2} ");
-        }
-        AppLogger.Info($"  IDRK: compSize={compressedSize} uncompSize={uncompressedSize} rawLen={raw.Length} overhead={raw.Length - compressedSize}{sb}");
-
-        // Payload is always at the end: payloadStart = rawLen - compressedSize
+        int overhead     = (int)(raw.Length - compressedSize);
         int payloadStart = overhead;
         int payloadSize  = (int)compressedSize;
 
-        if (payloadStart < 0 || payloadStart + payloadSize > raw.Length)
-        {
-            AppLogger.Error($"  → payload out of bounds: start={payloadStart} size={payloadSize} rawLen={raw.Length}");
-            return [];
-        }
+        if (payloadStart < 0 || payloadStart + payloadSize > raw.Length) return [];
 
         try
         {
-            byte[] result = ZlibExtHelper.Decompress(
+            return ZlibExtHelper.Decompress(
                 new ReadOnlySpan<byte>(raw, payloadStart, payloadSize),
                 uncompressedSize);
-            AppLogger.Info($"  → decompressed {result.Length} bytes (expected {uncompressedSize})");
-            return result;
         }
         catch (Exception ex)
         {
-            AppLogger.Exception("  → ZlibExt decompress failed", ex);
+            AppLogger.Exception("ZlibExt decompress failed", ex);
             return [];
         }
     }

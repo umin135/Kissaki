@@ -9,6 +9,9 @@ using SixLabors.ImageSharp.PixelFormats;
 
 namespace KissakiViewer.ViewModels;
 
+// ── Preview mode enum ─────────────────────────────────────────────────────────
+public enum PreviewMode { None, Texture, Model, Json }
+
 // ── Slot helper (mirrors what MainViewModel used to have) ─────────────────────
 internal record SlotBitmap(int Slot, BitmapSource Bmp, string Info);
 
@@ -46,6 +49,14 @@ public sealed partial class AssetTabItem : ObservableObject
             PreviewInfo  = SlotBitmaps[value].Info;
         }
     }
+
+    // ── Preview mode (single source of truth for content-area switching) ─────
+    [ObservableProperty] private PreviewMode _previewMode = PreviewMode.None;
+
+    // ── JSON / text preview (KTID, MTL, GRP, …) ───────────────────────────────
+    [ObservableProperty] private string _jsonText = string.Empty;
+
+    public bool HasJsonPreview => !string.IsNullOrEmpty(JsonText);
 
     // ── Model preview ──────────────────────────────────────────────────────────
     [ObservableProperty]
@@ -137,6 +148,12 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 await LoadTextureAsync(tab, ct);
             else if (ext == ".g1m")
                 await LoadModelAsync(tab, ct);
+            else if (ext == ".ktid")
+                await LoadKtidAsync(tab, ct);
+            else if (ext == ".grp")
+                await LoadGrpAsync(tab, ct);
+            else if (ext == ".mtl")
+                await LoadMtlAsync(tab, ct);
             else
             {
                 tab.StatusText = $"{ext} — 미리보기 미지원";
@@ -148,6 +165,73 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             tab.StatusText = $"오류: {ex.Message}";
             tab.IsLoading  = false;
         }
+    }
+
+    // ── MTL loading ───────────────────────────────────────────────────────────
+
+    private async Task LoadMtlAsync(AssetTabItem tab, CancellationToken ct)
+    {
+        var rec      = tab.Asset.Record;
+        var cont     = tab.Asset.Container;
+        string assetName = tab.Asset.DisplayName;
+
+        (string json, int nameCount, int matCount) = await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            byte[]       raw  = _extractor.ExtractToMemory(rec, cont);
+            MtlDecoder.MtlData mtl = MtlDecoder.Parse(raw);
+            return (MtlDecoder.ToJson(assetName, rec.FileKtid, mtl),
+                    mtl.Names.Length, (int)mtl.NumMat);
+        }, ct);
+
+        tab.JsonText    = json;
+        tab.StatusText  = $"{nameCount} name groups, {matCount} materials";
+        tab.PreviewMode = PreviewMode.Json;
+        tab.IsLoading   = false;
+    }
+
+    // ── GRP loading ───────────────────────────────────────────────────────────
+
+    private async Task LoadGrpAsync(AssetTabItem tab, CancellationToken ct)
+    {
+        var rec      = tab.Asset.Record;
+        var cont     = tab.Asset.Container;
+        string assetName = tab.Asset.DisplayName;
+
+        (string json, int count) = await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            byte[]            raw     = _extractor.ExtractToMemory(rec, cont);
+            GrpDecoder.Entry[] entries = GrpDecoder.Parse(raw);
+            return (GrpDecoder.ToJson(assetName, rec.FileKtid, entries), entries.Length);
+        }, ct);
+
+        tab.JsonText    = json;
+        tab.StatusText  = $"{count} entries";
+        tab.PreviewMode = PreviewMode.Json;
+        tab.IsLoading   = false;
+    }
+
+    // ── KTID loading ──────────────────────────────────────────────────────────
+
+    private async Task LoadKtidAsync(AssetTabItem tab, CancellationToken ct)
+    {
+        var rec         = tab.Asset.Record;
+        var cont        = tab.Asset.Container;
+        string assetName = tab.Asset.DisplayName;  // recovered name or 0xhash
+
+        (string json, int count) = await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            byte[]              raw     = _extractor.ExtractToMemory(rec, cont);
+            KtidDecoder.Entry[] entries = KtidDecoder.Parse(raw);
+            return (KtidDecoder.ToJson(assetName, rec.FileKtid, entries), entries.Length);
+        }, ct);
+
+        tab.JsonText    = json;
+        tab.StatusText  = $"{count} entries";
+        tab.PreviewMode = PreviewMode.Json;
+        tab.IsLoading   = false;
     }
 
     // ── Texture loading (mirrors MainViewModel.LoadTexturePreviewAsync) ────────
@@ -189,6 +273,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 tab.PreviewImage     = slots[0].Bmp;
                 tab.PreviewInfo      = slots[0].Info;
                 tab.StatusText       = $"로드 완료 ({slots.Count}개 슬롯)";
+                tab.PreviewMode      = PreviewMode.Texture;
                 tab.IsLoading        = false;
             });
         }, ct);
@@ -318,8 +403,9 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         Application.Current.Dispatcher.Invoke(() =>
         {
             tab.SetModelTextures(textures);
-            tab.G1mData    = model;
-            tab.IsLoading  = false;
+            tab.G1mData     = model;
+            tab.PreviewMode = PreviewMode.Model;
+            tab.IsLoading   = false;
             int v = model.Submeshes.Sum(s => s.Positions.Length);
             int t = model.Submeshes.Sum(s => s.Indices.Length / 3);
             tab.StatusText = $"{vm.KtidHex} | {model.Bones.Length} bones | {model.Submeshes.Length} submeshes | {v:N0} verts | {textures.Count} textures";
