@@ -2,148 +2,148 @@
 import struct, os
 
 G1T_PATH = r"G:\_GitProjectNEW\KissakiViewer\research\extracted\f782f325.g1t"
-EP_1       = 0x555588
-PIX_START_1 = 0x55559C  # ep_1 + 20
-
-FMTS = {
-    0x01: ("RGBA8",  False, 4), 0x02: ("BGRA8", False, 4),
-    0x03: ("RGBA16", False, 8), 0x04: ("R8",    False, 1),
-    0x3C: ("BC1s",   True,  8), 0x3D: ("BC2s",  True, 16),
-    0x3E: ("BC3s",   True, 16), 0x59: ("BC1",   True,  8),
-    0x5A: ("BC2",    True, 16), 0x5B: ("BC3",   True, 16),
-    0x5C: ("BC4",    True,  8), 0x5D: ("BC5",   True, 16),
-    0x5E: ("BC6H",   True, 16), 0x5F: ("BC7",   True, 16),
-}
-
-def chain(bcn, bpb, w, h, m):
-    t = 0
-    for i in range(m):
-        mw, mh = max(w >> i, 1), max(h >> i, 1)
-        t += (((mw+3)//4)*((mh+3)//4)*bpb) if bcn else (mw*mh*bpb)
-    return t
-
-def hdr_ok(d, off):
-    if off + 12 > len(d): return False
-    fc = d[off + 1]
-    b0, dm = d[off], d[off + 2]
-    mc = (b0 >> 4) & 0xF or 1
-    ww = 1 << ((dm >> 4) & 0xF)
-    hh = 1 << (dm & 0xF)
-    return fc in FMTS and 1 <= mc <= 14 and 4 <= ww <= 4096 and 4 <= hh <= 4096
-
-def fmt_str(d, off):
-    if off + 8 > len(d): return "OOB"
-    b0, fc, dm, b3 = d[off], d[off+1], d[off+2], d[off+3]
-    mc = (b0 >> 4) & 0xF or 1
-    ww, hh = 1 << ((dm >> 4) & 0xF), 1 << (dm & 0xF)
-    fi = FMTS.get(fc)
-    fn = fi[0] if fi else f"UNK0x{fc:02x}"
-    return f"fmt=0x{fc:02x}({fn}) {ww}x{hh} mips={mc} b3=0x{b3:02x}"
+EP_1        = 0x555588
+PIX_START_1 = 0x55559C  # ep_1 + 20 (extSize capped to 12)
+B0_1 = 0x70  # mips=7, flags=0
+FC_1 = 0x4C  # unknown format code
+DM_1 = 0xC1  # dim byte at ep_1
 
 with open(G1T_PATH, "rb") as f:
     data = f.read()
 N = len(data)
 remaining = N - PIX_START_1
-print(f"Loaded {N:,}B  ep_1=0x{EP_1:x}  pixStart_1=0x{PIX_START_1:x}  remaining={remaining:,}")
+print(f"Loaded {N:,}B  ep_1=0x{EP_1:x}  remaining={remaining:,}")
 
-# ── 1. GT1G magic search ─────────────────────────────────────────────────────
-print("\n=== GT1G / IDRK / other magic in remaining data ===")
-for magic in [b'GT1G', b'IDRK', b'K300', b'LFMO', b'G1M\x00']:
-    p = data.find(magic, PIX_START_1)
-    print(f"  {magic!r}: {'0x'+hex(p)[2:] if p >= 0 else 'not found'}")
+# ── 1. Find all occurrences of format 0x4c with same b0/dim as ep_1 ──────────
+print(f"\n=== Search for exact header pattern (b0={B0_1:02x} fc={FC_1:02x} dm={DM_1:02x}) ===")
+hits = []
+pos = EP_1
+while True:
+    idx = data.find(bytes([FC_1]), pos + 1, N - 10)
+    if idx < 0: break
+    if data[idx - 1] == B0_1 and data[idx + 1] == DM_1:
+        ep = idx - 1
+        hits.append(ep)
+        if len(hits) >= 20: break
+    pos = idx
 
-# ── 2. Hex context around ep_1 ───────────────────────────────────────────────
-print("\n=== 48 bytes at ep_1 ===")
-b = data[EP_1:EP_1+48]
-for row in range(0, 48, 16):
+if len(hits) > 1:
+    print(f"  Found {len(hits)} candidates (first is ep_1 = 0x{hits[0]:x})")
+    for i, h in enumerate(hits):
+        delta = h - (hits[i-1] if i > 0 else EP_1)
+        print(f"  [{i}] ep=0x{h:x}  delta=+0x{delta:x} ({delta:,})")
+    # Check if deltas are consistent
+    if len(hits) >= 3:
+        deltas = [hits[i] - hits[i-1] for i in range(1, len(hits))]
+        if len(set(deltas)) == 1:
+            print(f"\n  *** UNIFORM spacing: {deltas[0]:,} bytes ***")
+            chain = deltas[0] - 20  # subtract header
+            print(f"      chain_size = {deltas[0]:,} - 20 = {chain:,} bytes")
+else:
+    print(f"  Only found ep_1 itself — no repeated pattern")
+
+# ── 2. Search for ANY format 0x4c header in the remaining data ───────────────
+print(f"\n=== All format-0x4c byte-pairs in remaining data (up to 20) ===")
+hits2 = []
+pos = PIX_START_1
+while len(hits2) < 20:
+    idx = data.find(bytes([FC_1]), pos, N - 10)
+    if idx < 0: break
+    ep = idx - 1
+    if ep >= PIX_START_1:
+        b0 = data[ep]; dm = data[ep+2]; b3 = data[ep+3]
+        mc = (b0 >> 4) & 0xF or 1
+        ww = 1 << ((dm >> 4) & 0xF); hh = 1 << (dm & 0xF)
+        delta_from_pix = ep - PIX_START_1
+        hits2.append((ep, b0, dm, b3, mc, ww, hh, delta_from_pix))
+    pos = idx + 1
+
+for ep, b0, dm, b3, mc, ww, hh, delta in hits2:
+    print(f"  0x{ep:x} (+0x{delta:x}): b0=0x{b0:02x} dm=0x{dm:02x} b3=0x{b3:02x} → {ww}x{hh} mips={mc}")
+
+# ── 3. Check bytes at key BC7-chain-size-aligned positions ───────────────────
+print(f"\n=== Bytes at PIX_START_1 + N * BC7_2048_10mip_chain ===")
+CHAIN_BC7_2048 = 5_592_400
+for n in range(1, 5):
+    pos = PIX_START_1 + n * CHAIN_BC7_2048
+    if pos + 20 >= N:
+        print(f"  n={n}: 0x{pos:x} -- out of file")
+        break
+    b = data[pos:pos+20]
+    hs = " ".join(f"{x:02x}" for x in b)
+    fc = b[1] if len(b) > 1 else 0
+    print(f"  n={n}: 0x{pos:x}  {hs}  [fc=0x{fc:02x}]")
+
+# ── 4. Check with no-extblock assumption (pixStart = ep+8) ──────────────────
+print(f"\n=== Bytes at ep_1+8+N*BC7_2048_10mip_chain (no ext block) ===")
+PIX_8 = EP_1 + 8
+for n in range(1, 5):
+    pos = PIX_8 + n * CHAIN_BC7_2048
+    if pos + 20 >= N:
+        print(f"  n={n}: 0x{pos:x} -- out of file")
+        break
+    b = data[pos:pos+20]
+    hs = " ".join(f"{x:02x}" for x in b)
+    fc = b[1] if len(b) > 1 else 0
+    print(f"  n={n}: 0x{pos:x}  {hs}  [fc=0x{fc:02x}]")
+
+# ── 5. Analyze distribution of byte[1] values in the remaining data ──────────
+print(f"\n=== Format code byte [+1] histogram in remaining 16MB (at 4B alignment) ===")
+freq = {}
+for off in range(0, remaining - 4, 4):
+    fc = data[PIX_START_1 + off + 1]
+    freq[fc] = freq.get(fc, 0) + 1
+top = sorted(freq.items(), key=lambda x: -x[1])[:20]
+print(f"  Top 20 values at byte[+1] offsets (fc=byte[1]):")
+for fc, cnt in top:
+    pct = cnt * 400 / remaining  # approx % at 4B alignment
+    print(f"    0x{fc:02x}: {cnt:,}  (~{pct:.1f}%)")
+
+# ── 6. Dump 32 bytes at PIX_START_1 to cross-check against ep_1 header ───────
+print(f"\n=== Dump 128 bytes at 0xaaaaec (PIX_START_1 + BC7_2048_chain) ===")
+ZERO_POS = PIX_START_1 + CHAIN_BC7_2048
+b = data[ZERO_POS:ZERO_POS+128]
+for row in range(0, 128, 16):
     print("  " + " ".join(f"{x:02x}" for x in b[row:row+16]))
 
-# ── 3. Probe next-ep for each known-format assumption at pixStart_1 ──────────
-print("\n=== next_ep validity if tex1 pixel data starts at pixStart_1 ===")
-cases = [
-    ("BC7", True,16,2048,2048,10), ("BC5",True,16,2048,2048,10),
-    ("BC5", True,16,1024,1024,10), ("BC7",True,16,1024,1024,10),
-    ("BC5", True,16,2048,2048, 7), ("BC1",True, 8,2048,2048,10),
-    ("BC5", True,16, 512, 512, 9), ("BC1",True, 8,2048,2048, 7),
-    ("BC5", True,16, 512, 512,10), ("BC1",True, 8,1024,1024,10),
-]
-for name,bcn,bpb,w,h,m in cases:
-    sz = chain(bcn,bpb,w,h,m)
-    nep = PIX_START_1 + sz
-    ok  = hdr_ok(data, nep)
-    tag = "*** VALID HEADER ***" if ok else ("OOB" if nep>=N else "bad")
-    print(f"  {name} {w:4d}x{h:<4d} {m}mip  chain={sz:>8,}  next_ep=0x{nep:x}: {tag}")
-    if ok:
-        print(f"    >> {fmt_str(data, nep)}")
+# How many consecutive zeros?
+nz = 0
+while ZERO_POS + nz < N and data[ZERO_POS + nz] == 0:
+    nz += 1
+print(f"  Consecutive zeros from 0x{ZERO_POS:x}: {nz}")
+print(f"  First non-zero at: 0x{ZERO_POS+nz:x}  byte=0x{data[ZERO_POS+nz]:02x}")
 
-# ── 4. Same probe but assume pixStart = ep_1 + 4 / 8 / 12 ──────────────────
-print("\n=== next_ep with alternative pixStart offsets (no ext block) ===")
-for hdr_sz in [4, 8, 12]:
-    pix = EP_1 + hdr_sz
-    print(f"\n  -- pixStart = ep_1+{hdr_sz} = 0x{pix:x} --")
-    for name,bcn,bpb,w,h,m in cases[:6]:
-        sz  = chain(bcn,bpb,w,h,m)
-        nep = pix + sz
-        ok  = hdr_ok(data, nep)
-        if ok:
-            print(f"  *** {name} {w}x{h} {m}mip chain={sz:,} next_ep=0x{nep:x}: {fmt_str(data, nep)}")
-
-# ── 5. Chained scan: find TWO consecutive valid texture headers ───────────────
-print("\n=== Chained scan (first 8MB from pixStart_1) ===")
-SCAN = min(remaining, 8_000_000)
-hits = []
-for off in range(0, SCAN, 4):
-    ep = PIX_START_1 + off
-    if not hdr_ok(data, ep): continue
-    fc = data[ep+1]; b0 = data[ep]; dm = data[ep+2]
+# Sequential parse from 0xaaaaec treating format 0x00 as null (8-byte header, 0 chain)
+print(f"\n=== Sequential parse from 0x{ZERO_POS:x} (treat fmt=0 as null skip) ===")
+ep = ZERO_POS
+for i in range(1, 12):
+    if ep + 12 > N:
+        print(f"  [{i}] ep=0x{ep:x} -- out of bounds")
+        break
+    b0 = data[ep]; fc = data[ep+1]; dm = data[ep+2]; b3 = data[ep+3]
     mc = (b0>>4)&0xF or 1
     ww = 1<<((dm>>4)&0xF); hh = 1<<(dm&0xF)
-    fi = FMTS.get(fc)
-    if not fi: continue
-    sz = chain(fi[1],fi[2],ww,hh,mc)
-    # Try both: with ext block (ep+20) and without (ep+8)
-    for pix_off in [20, 8]:
-        pix = ep + pix_off
-        nep = pix + sz
-        if hdr_ok(data, nep):
-            hits.append((off, ep, pix_off, sz, nep))
-            break
-    if len(hits) >= 10: break
+    if fc == 0:
+        ext = 0
+    else:
+        ext_raw = struct.unpack_from("<I", data, ep+8)[0]
+        ext = ext_raw if ext_raw <= 0x400 else 0x0C
+    pix = ep + 8 + ext
+    from_fmts = "(KNOWN)" if fc in {"BC7":0x5f,"BC5":0x5d,"BC1":0x59,"BC4":0x5c}.values() else ""
+    is_04c = " ***0x4c***" if fc == 0x4c else ""
+    print(f"  [{i}] ep=0x{ep:x}  fc=0x{fc:02x}  {ww}x{hh}  mips={mc}  b3=0x{b3:02x}  ext={ext}  pixStart=0x{pix:x}{from_fmts}{is_04c}")
+    hex20 = " ".join(f"{data[ep+k]:02x}" for k in range(min(20, N-ep)))
+    print(f"       hdr: {hex20}")
+    if fc == 0:
+        ep = pix  # null: skip 8-byte header
+    elif fc == 0x4c:
+        ep = pix + CHAIN_BC7_2048  # assume same chain as BC7 2048x2048
+    else:
+        break
 
-if hits:
-    for off, ep, pix_off, sz, nep in hits:
-        print(f"  +0x{off:x}: ep=0x{ep:x} {fmt_str(data,ep)} chain={sz:,} pix_off={pix_off}")
-        print(f"     → nep=0x{nep:x}: {fmt_str(data,nep)}")
-else:
-    print("  No chained pairs found")
-
-# ── 6. Backward scan from EOF: find last texture header ─────────────────────
-print("\n=== Backward scan from EOF for last texture header ===")
-# Smallest plausible tail: BC1 4x4 1mip = 8 bytes, BC7 4x4 1mip = 16 bytes
-# Most likely the last mip chain is a few hundred bytes for a small mip level.
-# Scan last 2MB for valid headers
-BACK_RANGE = min(2_000_000, N - EP_1)
-last_hits = []
-for off in range(N-12, N-BACK_RANGE, -4):
-    if not hdr_ok(data, off): continue
-    fc = data[off+1]; b0 = data[off]; dm = data[off+2]
-    mc = (b0>>4)&0xF or 1
-    ww = 1<<((dm>>4)&0xF); hh = 1<<(dm&0xF)
-    fi = FMTS.get(fc)
-    if not fi: continue
-    sz = chain(fi[1],fi[2],ww,hh,mc)
-    for pix_off in [20, 8]:
-        pix_end = off + pix_off + sz
-        if abs(pix_end - N) <= 64:  # ends near EOF
-            last_hits.append((off, pix_off, sz, pix_end))
-            break
-    if len(last_hits) >= 5: break
-
-if last_hits:
-    for off, pix_off, sz, pix_end in last_hits:
-        diff = N - pix_end
-        print(f"  0x{off:x}: {fmt_str(data,off)}  chain={sz:,}  pix_end=0x{pix_end:x} (EOF-{diff})")
-else:
-    print("  None found near EOF")
+print(f"\n=== Last 64 bytes of file ===")
+b = data[N-64:]
+for row in range(0, 64, 16):
+    print("  " + " ".join(f"{x:02x}" for x in b[row:row+16]))
 
 print("\nDone.")

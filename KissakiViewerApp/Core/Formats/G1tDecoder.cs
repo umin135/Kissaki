@@ -27,9 +27,11 @@ public static class G1tDecoder
         [0x02] = new(FmtKind.Uncompressed, default, 4, "BGRA8_UNORM"),
         [0x03] = new(FmtKind.Uncompressed, default, 8, "RGBA16_UNORM"),
         [0x04] = new(FmtKind.Uncompressed, default, 1, "R8_UNORM"),
+        [0x22] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0x22"),
         [0x3C] = new(FmtKind.BCn, CompressionFormat.Bc1,  0, "BC1_SRGB"),
         [0x3D] = new(FmtKind.BCn, CompressionFormat.Bc2,  0, "BC2_SRGB"),
         [0x3E] = new(FmtKind.BCn, CompressionFormat.Bc3,  0, "BC3_SRGB"),
+        [0x54] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0x54"),
         [0x59] = new(FmtKind.BCn, CompressionFormat.Bc1,  0, "BC1_UNORM"),
         [0x5A] = new(FmtKind.BCn, CompressionFormat.Bc2,  0, "BC2_UNORM"),
         [0x5B] = new(FmtKind.BCn, CompressionFormat.Bc3,  0, "BC3_UNORM"),
@@ -37,6 +39,9 @@ public static class G1tDecoder
         [0x5D] = new(FmtKind.BCn, CompressionFormat.Bc5,  0, "BC5_UNORM"),
         [0x5E] = new(FmtKind.BCn, CompressionFormat.Bc6U, 0, "BC6H_UF16"),
         [0x5F] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_UNORM"),
+        [0x4C] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0x4C"),
+        [0xF9] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0xF9"),
+        [0xFC] = new(FmtKind.BCn, CompressionFormat.Bc7,  0, "BC7_0xFC"),
     };
 
     public static string GetFormatName(byte code) =>
@@ -92,6 +97,14 @@ public static class G1tDecoder
             uint w = 1u << ((dim >> 4) & 0xF);
             uint h = 1u << (dim & 0xF);
 
+            // Format 0x4C encodes square textures as w = h = 1 << ((dim >> 4) - 1).
+            // The standard formula produces 4096×2 from dim=0xC1; the actual size is 2048×2048.
+            if (fmtCode == 0x4C && ((dim >> 4) & 0xF) > 0)
+            {
+                uint side = 1u << (((dim >> 4) & 0xF) - 1);
+                w = h = side;
+            }
+
             uint extSize = 0;
             if (fmtCode != 0)
             {
@@ -102,7 +115,9 @@ public static class G1tDecoder
             int pixStart = ep + 8 + (int)extSize;
 
             bool fmtKnown = s_fmtMap.TryGetValue(fmtCode, out var fd);
-            if (sequential && fmtCode != 0 && fmtKnown)
+            if (sequential && fmtCode == 0)
+                nextEp = ep + 8; // null/placeholder slot — fixed 8-byte header, no pixel data
+            else if (sequential && fmtKnown)
                 nextEp = pixStart + ComputeMipChainSize(fd!, w, h, mipCount);
 
             AppLogger.Info($"  G1T[{i}] ep=0x{ep:x} fmt=0x{fmtCode:x2}({GetFormatName(fmtCode)}) {w}x{h} mips={mipCount} extSize={extSize} pixStart=0x{pixStart:x}" +
