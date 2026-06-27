@@ -1,0 +1,11 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:adonisUI="clr-namespace:AdonisUI;assembly=AdonisUI">
+
+    <!-- Dark Red accent theme override for AdonisUI -->
+    <Color x:Key="{x:Static adonisUI:Colors.AccentColor}">#C0392B</Color>
+    <Color x:Key="{x:Static adonisUI:Colors.AccentHighlightColor}">#E8A599</Color>
+    <Color x:Key="{x:Static adonisUI:Colors.AccentIntenseHighlightColor}">#E74C3C</Color>
+    <Color x:Key="{x:Static adonisUI:Colors.AccentInteractionColor}">#922B21</Color>
+
+</ResourceDictionary>

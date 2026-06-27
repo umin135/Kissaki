@@ -42,3 +42,7 @@ obj/
 *.tmp
 Thumbs.db
 .DS_Store
+Build.lnk
+
+_ideas/
+research/
