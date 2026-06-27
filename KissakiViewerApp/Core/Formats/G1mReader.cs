@@ -439,6 +439,7 @@ public static class G1mReader
             }
 
             // Index buffer
+            // IB values are absolute VB indices; subtract vStart to get 0-based positions-array indices.
             int numIdx   = (int)rs.NumIndices;
             int idxStart = (int)rs.IndexBufStart;
             var indices  = new int[numIdx];
@@ -446,12 +447,13 @@ public static class G1mReader
             {
                 int iOff = (idxStart + ii) * ib.IndexSize;
                 if (iOff + ib.IndexSize > ib.Data.Length) break;
-                indices[ii] = ib.IndexSize switch
+                int rawIdx = ib.IndexSize switch
                 {
                     1 => ib.Data[iOff],
                     2 => (int)ReadU16(ib.Data, iOff),
                     _ => (int)ReadU32(ib.Data, iOff),
                 };
+                indices[ii] = rawIdx - vStart;
             }
 
             result.Add(new G1mSubmesh

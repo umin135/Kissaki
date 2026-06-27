@@ -153,6 +153,24 @@
                                 <Setter Property="Padding" Value="6,3"/>
                                 <Setter Property="MinHeight" Value="26"/>
                                 <Setter Property="Foreground" Value="#DCDCDC"/>
+                                <!-- Tag = MainViewModel proxy so ContextMenu can reach commands -->
+                                <Setter Property="Tag"
+                                        Value="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListView}}"/>
+                                <Setter Property="ContextMenu">
+                                    <Setter.Value>
+                                        <ContextMenu>
+                                            <!-- PlacementTarget = ListViewItem; .Tag = MainViewModel; .DataContext = AssetItemViewModel -->
+                                            <MenuItem Header="Save Model (FBX)"
+                                                      Command="{Binding PlacementTarget.Tag.SaveModelCommand,
+                                                                RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext,
+                                                                         RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                            <MenuItem Header="Export Raw"
+                                                      Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
+                                                                RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                        </ContextMenu>
+                                    </Setter.Value>
+                                </Setter>
                                 <Style.Triggers>
                                     <Trigger Property="IsMouseOver" Value="True">
                                         <Setter Property="Background" Value="#1F1F1F"/>
@@ -223,6 +241,22 @@
                                     <Setter Property="Padding" Value="0"/>
                                     <Setter Property="Margin" Value="3"/>
                                     <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                                    <Setter Property="Tag"
+                                            Value="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                    <Setter Property="ContextMenu">
+                                        <Setter.Value>
+                                            <ContextMenu>
+                                                <MenuItem Header="Save Model (FBX)"
+                                                          Command="{Binding PlacementTarget.Tag.SaveModelCommand,
+                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext,
+                                                                             RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                                <MenuItem Header="Export Raw"
+                                                          Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
+                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                            </ContextMenu>
+                                        </Setter.Value>
+                                    </Setter>
                                     <Style.Triggers>
                                         <Trigger Property="IsSelected" Value="True">
                                             <Setter Property="Background" Value="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}"/>

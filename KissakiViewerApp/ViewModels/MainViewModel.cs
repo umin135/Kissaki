@@ -236,6 +236,156 @@ public sealed partial class MainViewModel : ObservableObject
         LoadProgress = 100;
     }
 
+    // ── Save Model (FBX) ─────────────────────────────────────────────────────
+
+    [RelayCommand(CanExecute = nameof(CanSaveModel))]
+    private async Task SaveModelAsync(AssetItemViewModel? vm)
+    {
+        vm ??= SelectedAsset;
+        if (vm == null || _extractor == null) return;
+
+        string exportDir = Path.Combine(AppContext.BaseDirectory, "export");
+        string stem      = vm.RecoveredName is string rn ? Path.GetFileNameWithoutExtension(rn) : vm.KtidHex;
+
+        StatusText = $"모델 내보내는 중... {stem}";
+
+        string? savedPath = null;
+        int     texCount  = 0;
+        string? err       = null;
+
+        var extractor = _extractor;
+        await Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(exportDir);
+
+                // 1. Parse G1M
+                byte[]   raw   = extractor.ExtractToMemory(vm.Record, vm.Container);
+                G1mData? model = G1mReader.Read(raw);
+                if (model == null) { err = "G1M 파싱 실패"; return; }
+
+                // 2. Resolve associated G1T files
+                var g1tFiles = ResolveG1tFilesForModel(vm);
+                AppLogger.Info($"[SaveModel] G1T files resolved: {g1tFiles.Count}");
+
+                // 3. Determine how many texture slots live in one G1T file
+                int texPerFile = 1;
+                if (g1tFiles.Count > 0)
+                {
+                    try
+                    {
+                        var fi = g1tFiles[0];
+                        var firstInfo = G1tDecoder.Survey(extractor.ExtractToMemory(fi.Record, fi.Container));
+                        if (firstInfo.Version == "1600")
+                        {
+                            int rc = firstInfo.Textures.Count(t => t.FmtCode != 0);
+                            if (rc > 1) texPerFile = rc;
+                        }
+                    }
+                    catch { }
+                }
+
+                // 4. Collect which global G1T slots are needed
+                var neededSlots = model.MaterialTextures.Count > 0
+                    ? model.MaterialTextures.Select(x => x.G1tSlot).Distinct().ToList()
+                    : model.Submeshes.Select(s => s.MaterialIndex).Where(m => m >= 0).Distinct().ToList();
+
+                // 5. Group by G1T file index, extract and save PNGs
+                var matTexPaths = new Dictionary<int, string>(); // matIdx → relative .png name
+
+                foreach (var grp in neededSlots.GroupBy(s => s / texPerFile))
+                {
+                    int fileIdx = grp.Key;
+                    if (fileIdx >= g1tFiles.Count) continue;
+
+                    byte[] g1tRaw;
+                    try { g1tRaw = extractor.ExtractToMemory(g1tFiles[fileIdx].Record, g1tFiles[fileIdx].Container); }
+                    catch { continue; }
+                    if (g1tRaw.Length < 8 || g1tRaw[0] != 'G') continue;
+
+                    List<(int Slot, Image<Rgba32> Image)> decoded;
+                    try { decoded = G1tDecoder.DecodeAll(g1tRaw); }
+                    catch { continue; }
+
+                    var neededInternal = new HashSet<int>(grp.Select(s => s % texPerFile));
+
+                    foreach (var (intSlot, img) in decoded)
+                    {
+                        if (img == null) continue;
+
+                        if (!neededInternal.Contains(intSlot)) { img.Dispose(); continue; }
+
+                        int globalSlot = fileIdx * texPerFile + intSlot;
+                        string texName = $"{stem}_g1t{globalSlot}.png";
+                        string texPath = Path.Combine(exportDir, texName);
+
+                        try
+                        {
+                            using (img) img.SaveAsPng(texPath);
+                            texCount++;
+                            AppLogger.Info($"[SaveModel] Saved texture: {texName}");
+
+                            // Map every material that references this slot
+                            foreach (var (matIdx, slot, _) in model.MaterialTextures)
+                                if (slot == globalSlot)
+                                    matTexPaths.TryAdd(matIdx, texName);
+                        }
+                        catch (Exception ex2)
+                        {
+                            img.Dispose();
+                            AppLogger.Warn($"[SaveModel] PNG save failed ({texName}): {ex2.Message}");
+                        }
+                    }
+                }
+
+                // 6. Export geometry (OBJ/FBX) with texture references embedded in MTL
+                savedPath = G1mFbxExporter.Export(model, exportDir, stem, matTexPaths);
+            }
+            catch (Exception ex)
+            {
+                err = ex.Message;
+                AppLogger.Error($"[SaveModel] {ex}");
+            }
+        });
+
+        StatusText = err != null
+            ? $"내보내기 오류: {err}"
+            : $"저장 완료 → {savedPath}  ({texCount}개 텍스처)";
+    }
+
+    private bool CanSaveModel(AssetItemViewModel? vm)
+        => (vm ?? SelectedAsset)?.TypeExt == ".g1m" && _extractor != null;
+
+    private List<AssetItemViewModel> ResolveG1tFilesForModel(AssetItemViewModel vm)
+    {
+        uint   ktid = vm.Record.FileKtid;
+        string cont = vm.Container;
+        ushort fid  = vm.Record.FdataId;
+
+        // Priority 1: kidsobjdb map
+        if (_g1mToG1tMap.TryGetValue(ktid, out var mapped) && mapped.Count > 0)
+            return mapped.ToList();
+
+        // Priority 2: co-located G1T in the same fdata container
+        var colocated = _allAssetsByKtid.Values
+            .Where(a => a.Container == cont && a.TypeExt == ".g1t")
+            .OrderBy(a => a.Record.FdataOffset)
+            .ToList();
+        if (colocated.Count > 0) return colocated;
+
+        // Priority 3: nearest fdata ID
+        if (_allG1tByFid.Count == 0) return [];
+        ushort nearestFid  = 0;
+        int    nearestDelta = int.MaxValue;
+        foreach (var f in _allG1tByFid.Keys)
+        {
+            int d = Math.Abs((int)f - (int)fid);
+            if (d < nearestDelta) { nearestDelta = d; nearestFid = f; }
+        }
+        return _allG1tByFid.TryGetValue(nearestFid, out var list) ? list : [];
+    }
+
     // ── Export ────────────────────────────────────────────────────────────────
 
     [RelayCommand]
