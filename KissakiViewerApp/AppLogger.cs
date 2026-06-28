@@ -21,7 +21,7 @@ public static class AppLogger
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
-            Append($"\n========== Session {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==========\n");
+            File.WriteAllText(LogPath, $"========== Session {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==========\n");
         }
         catch { }
     }

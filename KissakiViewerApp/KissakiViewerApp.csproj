@@ -22,6 +22,12 @@
   </Target>
 
   <ItemGroup>
+    <Content Include="Images\defaultHDR.hdr">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="AdonisUI" Version="1.17.1" />
     <PackageReference Include="AdonisUI.ClassicTheme" Version="1.17.1" />
     <PackageReference Include="AssimpNet" Version="4.1.0" />

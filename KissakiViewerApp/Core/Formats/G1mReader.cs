@@ -1,4 +1,5 @@
 using System.Numerics;
+using KissakiViewer;
 
 namespace KissakiViewer.Core.Formats;
 
@@ -14,11 +15,15 @@ public sealed class NunoEntry
 
 public sealed class G1mBone
 {
-    public int        ParentIndex    { get; set; } = -1;
-    public Vector3    LocalPosition  { get; set; }
-    public Quaternion LocalRotation  { get; set; } = Quaternion.Identity;
-    public Vector3    LocalScale     { get; set; } = Vector3.One;
-    public Matrix4x4  WorldMatrix    { get; set; } = Matrix4x4.Identity;
+    public int        ParentIndex     { get; set; } = -1;
+    public Vector3    LocalPosition   { get; set; }
+    public Quaternion LocalRotation   { get; set; } = Quaternion.Identity;
+    public Vector3    LocalScale      { get; set; } = Vector3.One;
+    public Matrix4x4  WorldMatrix     { get; set; } = Matrix4x4.Identity;
+    // Scale-free world transform — matches RDB Explorer ComputeBoneWorldTransforms.
+    // Used for cloth CP transform to avoid scale contamination in the rotation part.
+    public Vector3    WorldPosition   { get; set; }
+    public Quaternion WorldQuaternion { get; set; } = Quaternion.Identity;
 }
 
 public sealed class G1mSubmesh
@@ -49,6 +54,10 @@ public sealed class G1mData
     // material index → texture slot bindings from sec 0x10002
     // TexType: 1=COLOR, 2=NORMAL, 3=SPEC, 4=ROUGHNESS, 5=DIRT, ...
     public List<(int MatIdx, int G1tSlot, int UvLayer, int TexType)> MaterialTextures { get; } = [];
+    // G1MS BoneIDList: BoneIdList[nunoParentID] → bone array index
+    public ushort[]? BoneIdList { get; set; }
+    // G1MG JOINTPALETTES: per-submesh bone palette for LBS skinning
+    public List<uint[]> BonePalettes { get; } = new();
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────────
@@ -97,6 +106,8 @@ public static class G1mReader
     private const byte SEM_TEXCOORD     = 5;
     private const byte SEM_TANGENT      = 6;
     private const byte SEM_BITANGENT    = 7;
+    private const byte SEM_COLOR        = 10; // secondary combination weights (cpWeights2 row-combine)
+    private const byte SEM_FOG          = 11; // 3rd CP index set for cloth deformation
 
     // G1MGSemantic.data_type (EG1MGVADatatype enum values)
     private const ushort DT_FLOAT1    = 0x00;
@@ -119,6 +130,7 @@ public static class G1mReader
 
         var result       = new G1mData();
         var pendingCloth = new List<PendingCloth>();
+        var pendingRigid = new List<PendingRigidSkin>();
         int pos = (int)headerSize;
 
         for (int c = 0; c < numChunks && pos + 0xC <= data.Length; c++)
@@ -135,7 +147,7 @@ public static class G1mReader
                 Buffer.BlockCopy(data, pos, result.G1mfRaw, 0, Math.Min((int)chunkSize, data.Length - pos));
             }
             else if (chunkSig == SIG_G1MS) ReadG1MS(data, pos, result);
-            else if (chunkSig == SIG_G1MG) ReadG1MG(data, pos, result, pendingCloth);
+            else if (chunkSig == SIG_G1MG) ReadG1MG(data, pos, result, pendingCloth, pendingRigid);
             else if (chunkSig == SIG_G1MM)
             {
                 result.G1mmRaw = new byte[(int)chunkSize];
@@ -147,6 +159,7 @@ public static class G1mReader
         }
 
         ComputeWorldMatrices(result.Bones);
+        if (pendingRigid.Count > 0) ApplyRigidSkinning(result, pendingRigid);
         if (pendingCloth.Count > 0) ApplyNunoTransform(result, pendingCloth);
         return result;
     }
@@ -164,6 +177,18 @@ public static class G1mReader
         if (cs + 0x1C > data.Length) return;
         uint   bonesOffset = ReadU32(data, cs + 0x0C);
         ushort numBones    = ReadU16(data, cs + 0x14);
+        ushort numIndices  = ReadU16(data, cs + 0x16);
+
+        // BoneIDList at cs+0x1C: maps NUNO parentID → bone array index
+        if (numIndices > 0)
+        {
+            var boneIdList = new ushort[numIndices];
+            int blPos = cs + 0x1C;
+            for (int i = 0; i < numIndices && blPos + 2 <= data.Length; i++, blPos += 2)
+                boneIdList[i] = ReadU16(data, blPos);
+            r.BoneIdList = boneIdList;
+        }
+
         if (numBones == 0) return;
 
         int bp = cs + (int)bonesOffset;
@@ -196,7 +221,7 @@ public static class G1mReader
     //   +00 sig +04 ver +08 size +0C platform +10 unk
     //   +14 min_x/y/z f32  +20 max_x/y/z f32  +2C num_sections u32
     // Sections after header: [sectionId u32][sectionSize u32 (incl. 8B header)][...data...]
-    private static void ReadG1MG(byte[] data, int cs, G1mData r, List<PendingCloth> pendingCloth)
+    private static void ReadG1MG(byte[] data, int cs, G1mData r, List<PendingCloth> pendingCloth, List<PendingRigidSkin> pendingRigid)
     {
         if (cs + 0x30 > data.Length) return;
 
@@ -248,6 +273,7 @@ public static class G1mReader
             else if (secType == SEC_LAYOUTS)    ReadLayoutSection (data, secData, secEnd, layouts);
             else if (secType == SEC_INDICES)    ReadIndexSection  (data, secData, secEnd, ibs, g1mgVersion);
             else if (secType == SEC_SUBMESHES)  ReadSubmeshSection(data, secData, secEnd, rawSubs);
+            else if (secType == SEC_JOINTPALETTES) ParseJointPalettes(data, secData, secEnd, r);
             else if (secType == SEC_MESHGROUPS) { mgSecData = secData; mgSecEnd = secEnd; }
 
             pos = secEnd;
@@ -257,7 +283,7 @@ public static class G1mReader
             ? ParseMeshGroupClothIds(data, mgSecData, mgSecEnd, g1mgVersion)
             : new Dictionary<int, (int clothId, int extId)>();
 
-        r.Submeshes = BuildSubmeshes(rawSubs, vbs, layouts, ibs, clothInfo, pendingCloth);
+        r.Submeshes = BuildSubmeshes(rawSubs, vbs, layouts, ibs, clothInfo, pendingCloth, pendingRigid);
     }
 
     // ── Section readers ───────────────────────────────────────────────────────
@@ -526,7 +552,8 @@ public static class G1mReader
         List<RawSubmesh> rawSubs, List<VertexBuffer> vbs,
         List<LayoutEntry> layouts, List<IndexBuffer> ibs,
         Dictionary<int, (int clothId, int extId)> clothInfo,
-        List<PendingCloth> pendingCloth)
+        List<PendingCloth> pendingCloth,
+        List<PendingRigidSkin> pendingRigid)
     {
         var result = new List<G1mSubmesh>();
         for (int smIdx = 0; smIdx < rawSubs.Count; smIdx++)
@@ -550,7 +577,7 @@ public static class G1mReader
             int vStart   = (int)rs.VertexBufStart;
 
             // Collect semantics
-            Semantic? posSem = null, normSem = null, biSem = null, biIdxSem = null, psizeSem = null;
+            Semantic? posSem = null, normSem = null, biIdxSem = null, bwSem = null;
             var uvSems = new SortedList<int, Semantic>();
             foreach (var sem in layout.Semantics)
             {
@@ -558,11 +585,11 @@ public static class G1mReader
                 {
                     case SEM_POSITION:     posSem   ??= sem; break;
                     case SEM_NORMAL:       normSem  ??= sem; break;
-                    case SEM_BITANGENT:    biSem    ??= sem; break;
                     case SEM_BLENDINDICES: biIdxSem ??= sem; break;
-                    case SEM_PSIZE:        psizeSem ??= sem; break;
+                    case SEM_BLENDWEIGHT:  bwSem    ??= sem; break;
                     case SEM_TEXCOORD:
-                        if (!uvSems.ContainsKey(sem.Layer))
+                        // UB4 texcoords are CP index sets (cloth idx4), NOT UV channels
+                        if (sem.DataType != DT_UBYTE4 && !uvSems.ContainsKey(sem.Layer))
                             uvSems[sem.Layer] = sem;
                         break;
                 }
@@ -575,27 +602,83 @@ public static class G1mReader
 
             if (clothId == 1)
             {
-                // NUNO cloth: BLENDWEIGHT (type 1) = cpWeights (float4, sum=1, standard skinning weights)
-                //             BLENDINDICES (type 2) = cpIdx (ubyte4)
-                //             NORMAL (type 3) = localNormal.xyz + depth.w (float4)
-                // Note: BITANGENT (type 7) sums to 0 — it is a tangent derivative, NOT position weights.
-                // Note: POSITION (type 0) also sums to 1 but can have extreme negatives (down to -8);
-                //       BLENDWEIGHT is the standard skinning-weight semantic and is used here.
-                var bw1 = new Vector4[numVerts];
-                var bi1 = new BlendIdx4[numVerts];
-                var nd  = new Vector4[numVerts];
+                // NUNO cloth deformation (RDB Explorer formula):
+                //   cpWeights1 = POSITION (U-basis blend weights, sum~1)
+                //   cpWeights2 = BITANGENT (V-basis tangent weights, sum~0)
+                //   comWeights1 = BLENDWEIGHT (row combination weights)
+                //   comWeights2 = COLOR layer1 (secondary row combination, optional)
+                //   idx1..4     = BLENDINDICES / PSIZE / FOG / TEXCOORD-layer5 (CP index sets)
+                //   normalDepth = NORMAL (xyz=localNorm, w=depth)
+                // For each vertex: u_k = GetPoint(idx_k, cpW1); v_k = GetPoint(idx_k, cpW2)
+                //   a = Σ(u_k × cW1_k); c = Σ(v_k × cW1_k)
+                //   b = Σ(u_k × cW2_k) if COLOR_1 else a
+                //   d = normalize(cross(normalize(b), normalize(c)))
+                //   finalPos = a + d × depth
 
-                // Prefer BLENDWEIGHT (type 1) for weights; BLENDINDICES (type 2) for indices
-                Semantic? bwSem = layout.Semantics.FirstOrDefault(s => s.Type == SEM_BLENDWEIGHT);
-                byte[]? bwDat  = bwSem    != null ? GetVertexData(vbs, layout, bwSem)    : null; int bwStr  = bwSem    != null ? GetStride(vbs, layout, bwSem)    : 0;
-                byte[]? biDat  = biIdxSem != null ? GetVertexData(vbs, layout, biIdxSem) : null; int biStr  = biIdxSem != null ? GetStride(vbs, layout, biIdxSem) : 0;
-                byte[]? ndDat  = normSem  != null ? GetVertexData(vbs, layout, normSem)  : null; int ndStr  = normSem  != null ? GetStride(vbs, layout, normSem)  : 0;
+                Semantic? cpW1Sem = layout.Semantics.FirstOrDefault(s => s.Type == SEM_POSITION);
+                Semantic? cpW2Sem = layout.Semantics.FirstOrDefault(s => s.Type == SEM_BITANGENT);
+                Semantic? cW1Sem  = layout.Semantics.FirstOrDefault(s => s.Type == SEM_BLENDWEIGHT);
+                Semantic? cW2Sem  = layout.Semantics.FirstOrDefault(s => s.Type == SEM_COLOR && s.Layer == 1);
+                // biIdxSem = idx1 (already found above)
+                Semantic? i2Sem   = layout.Semantics.FirstOrDefault(s => s.Type == SEM_PSIZE);
+                Semantic? i3Sem   = layout.Semantics.FirstOrDefault(s => s.Type == SEM_FOG);
+                Semantic? i4Sem   = layout.Semantics.FirstOrDefault(s => s.Type == SEM_TEXCOORD && s.Layer == 5 && s.DataType == DT_UBYTE4);
+
+                static byte[]? VD(List<VertexBuffer> vb, LayoutEntry ly, Semantic? s) =>
+                    s != null ? GetVertexData(vb, ly, s) : null;
+                static int ST(List<VertexBuffer> vb, LayoutEntry ly, Semantic? s) =>
+                    s != null ? GetStride(vb, ly, s) : 0;
+
+                byte[]? cpW1D = VD(vbs, layout, cpW1Sem); int cpW1S = ST(vbs, layout, cpW1Sem);
+                byte[]? cpW2D = VD(vbs, layout, cpW2Sem); int cpW2S = ST(vbs, layout, cpW2Sem);
+                byte[]? cW1D  = VD(vbs, layout, cW1Sem);  int cW1St = ST(vbs, layout, cW1Sem);
+                byte[]? cW2D  = VD(vbs, layout, cW2Sem);  int cW2St = ST(vbs, layout, cW2Sem);
+                byte[]? i1D   = VD(vbs, layout, biIdxSem);int i1S   = ST(vbs, layout, biIdxSem);
+                byte[]? i2D   = VD(vbs, layout, i2Sem);   int i2S   = ST(vbs, layout, i2Sem);
+                byte[]? i3D   = VD(vbs, layout, i3Sem);   int i3S   = ST(vbs, layout, i3Sem);
+                byte[]? i4D   = VD(vbs, layout, i4Sem);   int i4S   = ST(vbs, layout, i4Sem);
+                byte[]? ndD   = VD(vbs, layout, normSem);  int ndS   = ST(vbs, layout, normSem);
+
+                var cpW1Arr = new Vector4[numVerts];
+                var cpW2Arr = new Vector4[numVerts];
+                var cW1Arr  = new Vector4[numVerts];
+                var cW2Arr  = cW2Sem != null ? new Vector4[numVerts] : [];
+                var i1Arr   = new BlendIdx4[numVerts];
+                var i2Arr   = i2Sem  != null ? new BlendIdx4[numVerts] : [];
+                var i3Arr   = i3Sem  != null ? new BlendIdx4[numVerts] : [];
+                var i4Arr   = i4Sem  != null ? new BlendIdx4[numVerts] : [];
+                var ndArr   = new Vector4[numVerts];
+
+                ushort cpW1Dt = cpW1Sem?.DataType ?? DT_FLOAT4;
+                ushort cpW2Dt = cpW2Sem?.DataType ?? DT_FLOAT4;
+                ushort cW1Dt  = cW1Sem?.DataType  ?? DT_FLOAT4;
+                ushort cW2Dt  = cW2Sem?.DataType  ?? DT_FLOAT4;
+                ushort i1Dt   = biIdxSem?.DataType ?? DT_UBYTE4;
+                ushort i2Dt   = i2Sem?.DataType   ?? DT_UBYTE4;
+                ushort i3Dt   = i3Sem?.DataType   ?? DT_UBYTE4;
+                ushort i4Dt   = i4Sem?.DataType   ?? DT_UBYTE4;
+                ushort ndDt   = normSem?.DataType  ?? DT_FLOAT4;
+                int cpW1Of = cpW1Sem?.Offset ?? 0;
+                int cpW2Of = cpW2Sem?.Offset ?? 0;
+                int cW1Of  = cW1Sem?.Offset  ?? 0;
+                int cW2Of  = cW2Sem?.Offset  ?? 0;
+                int i1Of   = biIdxSem?.Offset ?? 0;
+                int i2Of   = i2Sem?.Offset   ?? 0;
+                int i3Of   = i3Sem?.Offset   ?? 0;
+                int i4Of   = i4Sem?.Offset   ?? 0;
+                int ndOf   = normSem?.Offset  ?? 0;
 
                 for (int vi = 0; vi < numVerts; vi++)
                 {
-                    if (bwSem    != null) bw1[vi] = ReadVec4(bwDat,  vStart+vi, bwStr,  bwSem.Offset,    bwSem.DataType);
-                    if (biIdxSem != null) bi1[vi] = ReadBlendIdx4(biDat,  vStart+vi, biStr,  biIdxSem.Offset, biIdxSem.DataType);
-                    if (normSem  != null) nd[vi]  = ReadVec4(ndDat,  vStart+vi, ndStr,  normSem.Offset,  normSem.DataType);
+                    cpW1Arr[vi] = ReadVec4(cpW1D, vStart+vi, cpW1S, cpW1Of, cpW1Dt);
+                    cpW2Arr[vi] = ReadVec4(cpW2D, vStart+vi, cpW2S, cpW2Of, cpW2Dt);
+                    cW1Arr[vi]  = ReadVec4(cW1D,  vStart+vi, cW1St, cW1Of,  cW1Dt);
+                    if (cW2Sem != null) cW2Arr[vi] = ReadVec4(cW2D, vStart+vi, cW2St, cW2Of, cW2Dt);
+                    i1Arr[vi]   = ReadBlendIdx4(i1D, vStart+vi, i1S, i1Of, i1Dt);
+                    if (i2Sem  != null) i2Arr[vi] = ReadBlendIdx4(i2D, vStart+vi, i2S, i2Of, i2Dt);
+                    if (i3Sem  != null) i3Arr[vi] = ReadBlendIdx4(i3D, vStart+vi, i3S, i3Of, i3Dt);
+                    if (i4Sem  != null) i4Arr[vi] = ReadBlendIdx4(i4D, vStart+vi, i4S, i4Of, i4Dt);
+                    ndArr[vi]   = ReadVec4(ndD,   vStart+vi, ndS,  ndOf,  ndDt);
                 }
 
                 int submeshIdx = result.Count;
@@ -610,41 +693,80 @@ public static class G1mReader
                     MatPalId      = rs.MatPalId,
                 });
 
-                // extId convention: >= 20000 → nunoIdx = extId % 20000; else direct index
                 int nunoIdx = extId >= 20000 ? extId % 20000 : extId;
                 pendingCloth.Add(new PendingCloth
                 {
                     NunoEntryIndex = nunoIdx,
                     SubmeshIndex   = submeshIdx,
-                    BlendWeights1  = bw1,
-                    BlendWeights2  = [],
-                    BlendIndices1  = bi1,
-                    BlendIndices2  = [],
-                    NormalDepth    = nd,
+                    CpWeights1     = cpW1Arr,
+                    CpWeights2     = cpW2Arr,
+                    ComWeights1    = cW1Arr,
+                    ComWeights2    = cW2Arr,
+                    Indices1       = i1Arr,
+                    Indices2       = i2Arr,
+                    Indices3       = i3Arr,
+                    Indices4       = i4Arr,
+                    NormalDepth    = ndArr,
                 });
                 continue;
             }
 
             // ── Rigid mesh path ───────────────────────────────────────────────
-            var positions = new Vector3[numVerts];
-            var normals   = new Vector3[numVerts];
+            var rawPos  = new Vector3[numVerts];
+            var rawNorm = new Vector3[numVerts];
             for (int vi = 0; vi < numVerts; vi++)
             {
-                positions[vi] = ReadVec3(GetVertexData(vbs, layout, posSem),  vStart+vi, GetStride(vbs, layout, posSem),  posSem.Offset,  posSem.DataType);
+                rawPos[vi] = ReadVec3(GetVertexData(vbs, layout, posSem), vStart+vi, GetStride(vbs, layout, posSem), posSem.Offset, posSem.DataType);
                 if (normSem != null)
-                    normals[vi] = ReadVec3(GetVertexData(vbs, layout, normSem), vStart+vi, GetStride(vbs, layout, normSem), normSem.Offset, normSem.DataType);
+                    rawNorm[vi] = ReadVec3(GetVertexData(vbs, layout, normSem), vStart+vi, GetStride(vbs, layout, normSem), normSem.Offset, normSem.DataType);
             }
 
-            result.Add(new G1mSubmesh
+            if (bwSem != null && biIdxSem != null)
             {
-                Positions     = positions,
-                Normals       = normals,
-                TexCoords     = allUvChannels.Length > 0 ? allUvChannels[0] : [],
-                AllTexCoords  = allUvChannels,
-                Indices       = indices,
-                MaterialIndex = rs.Material,
-                MatPalId      = rs.MatPalId,
-            });
+                // Vertices in bone-local space → defer LBS to ApplyRigidSkinning
+                var bwD = GetVertexData(vbs, layout, bwSem);  int bwS = GetStride(vbs, layout, bwSem);
+                var biD = GetVertexData(vbs, layout, biIdxSem); int biS = GetStride(vbs, layout, biIdxSem);
+                var bws = new Vector4[numVerts];
+                var bis = new BlendIdx4[numVerts];
+                for (int vi = 0; vi < numVerts; vi++)
+                {
+                    bws[vi] = ReadVec4(bwD, vStart+vi, bwS, bwSem.Offset, bwSem.DataType);
+                    bis[vi] = ReadBlendIdx4(biD, vStart+vi, biS, biIdxSem.Offset, biIdxSem.DataType);
+                }
+                int subIdx = result.Count;
+                result.Add(new G1mSubmesh
+                {
+                    Positions     = new Vector3[numVerts],  // filled in ApplyRigidSkinning
+                    Normals       = new Vector3[numVerts],
+                    TexCoords     = allUvChannels.Length > 0 ? allUvChannels[0] : [],
+                    AllTexCoords  = allUvChannels,
+                    Indices       = indices,
+                    MaterialIndex = rs.Material,
+                    MatPalId      = rs.MatPalId,
+                });
+                pendingRigid.Add(new PendingRigidSkin
+                {
+                    SubmeshIndex = subIdx,
+                    BoneMapIndex = rs.BoneMapIndex,
+                    RawPositions = rawPos,
+                    RawNormals   = rawNorm,
+                    BlendWeights = bws,
+                    BlendIndices = bis,
+                });
+            }
+            else
+            {
+                result.Add(new G1mSubmesh
+                {
+                    Positions     = rawPos,
+                    Normals       = rawNorm,
+                    TexCoords     = allUvChannels.Length > 0 ? allUvChannels[0] : [],
+                    AllTexCoords  = allUvChannels,
+                    Indices       = indices,
+                    MaterialIndex = rs.Material,
+                    MatPalId      = rs.MatPalId,
+                });
+            }
         }
         return [.. result];
     }
@@ -718,16 +840,31 @@ public static class G1mReader
         }
 
         r.NunoEntries = [.. entries];
+        AppLogger.Info($"[NUNO] Parsed {entries.Count} NUNO1 entries");
+        for (int i = 0; i < entries.Count; i++)
+            AppLogger.Info($"[NUNO]   [{i}] parentId={entries[i].ParentBoneId} cpCount={entries[i].ControlPoints.Length}");
     }
 
     // ── NUNO cloth vertex transform ───────────────────────────────────────────
 
-    // Transforms each pending cloth submesh's placeholder positions into world-space
-    // geometry using the NUNO control-point blend formula (RDB Explorer reference):
-    //   worldCP[k] = Transform(entry.CPs[k].XYZ, bones[parentId].WorldMatrix)
-    //   pos = Σ(worldCP[cpIdx1[j]] * cpWeight1[j] + worldCP[cpIdx2[j]] * cpWeight2[j])
-    //   worldNormal = TransformNormal(localNormal, boneMatrix)
-    //   finalPos = pos + Normalize(worldNormal) * depth
+    // NUNO cloth vertex deformation (RDB Explorer reference formula):
+    //   For each vertex, 4 sets of CP indices define a bilinear patch on the cloth surface.
+    //   cpWeights1 (POSITION) blends within each row → position vectors u1..u4
+    //   cpWeights2 (BITANGENT) blends within each row → tangent vectors v1..v4
+    //   comWeights1 (BLENDWEIGHT) combines rows → a = surface position, c = V-tangent
+    //   comWeights2 (COLOR_1) optional → b = U-tangent (fallback: b = a)
+    //   d = normalize(cross(normalize(b), normalize(c))) = cloth surface normal
+    //   finalPos = a + d * depth
+    private static Vector3 GetClothPoint(BlendIdx4 idx, Vector4 weights, Vector3[] wCPs)
+    {
+        var res = Vector3.Zero;
+        if (weights.X != 0 && idx.I0 < wCPs.Length) res += wCPs[idx.I0] * weights.X;
+        if (weights.Y != 0 && idx.I1 < wCPs.Length) res += wCPs[idx.I1] * weights.Y;
+        if (weights.Z != 0 && idx.I2 < wCPs.Length) res += wCPs[idx.I2] * weights.Z;
+        if (weights.W != 0 && idx.I3 < wCPs.Length) res += wCPs[idx.I3] * weights.W;
+        return res;
+    }
+
     private static void ApplyNunoTransform(G1mData r, List<PendingCloth> pending)
     {
         foreach (var pc in pending)
@@ -736,56 +873,190 @@ public static class G1mReader
             if (nunoIdx < 0 || nunoIdx >= r.NunoEntries.Length) continue;
             var entry = r.NunoEntries[nunoIdx];
 
-            int boneId = entry.ParentBoneId;
-            if (boneId < 0 || boneId >= r.Bones.Length) continue;
-            var boneMat = r.Bones[boneId].WorldMatrix;
+            int listIdx = entry.ParentBoneId;
+            int boneId;
+            if (r.BoneIdList != null && (uint)listIdx < (uint)r.BoneIdList.Length)
+            {
+                boneId = r.BoneIdList[listIdx];
+                if (boneId == 0xFFFF) boneId = 0;
+            }
+            else
+                boneId = listIdx;
+            if ((uint)boneId >= (uint)r.Bones.Length) continue;
+            var bone     = r.Bones[boneId];
+            var bonePos  = bone.WorldPosition;
+            var boneQuat = bone.WorldQuaternion;
 
-            // Pre-transform all CPs to world space
+            var sub = r.Submeshes[pc.SubmeshIndex];
+            int n   = Math.Min(pc.CpWeights1.Length, sub.Positions.Length);
+
+            // ── Cloth vertex transform ───────────────────────────────────────────
+            // Per-vertex RIVET detection (matches RDB Explorer exactly):
+            //   BITANGENT channel = zero  →  bone-attached (RIVET): bonePos + boneRot * localPos
+            //   BITANGENT channel ≠ zero  →  cloth simulation: full basis-deformation formula
+            // Using submesh-level detection was wrong; a single submesh can mix both types.
             var wCPs = new Vector3[entry.ControlPoints.Length];
             for (int k = 0; k < wCPs.Length; k++)
             {
                 var cp = entry.ControlPoints[k];
-                wCPs[k] = Vector3.Transform(new Vector3(cp.X, cp.Y, cp.Z), boneMat);
+                wCPs[k] = bonePos + Vector3.Transform(new Vector3(cp.X, cp.Y, cp.Z), boneQuat);
             }
 
-            var sub   = r.Submeshes[pc.SubmeshIndex];
-            bool hasW2 = pc.BlendWeights2.Length == pc.BlendWeights1.Length;
-            bool hasI2 = pc.BlendIndices2.Length == pc.BlendWeights1.Length;
-            int  n    = Math.Min(pc.BlendWeights1.Length, sub.Positions.Length);
+            bool hasI2  = pc.Indices2.Length == n;
+            bool hasI3  = pc.Indices3.Length == n;
+            bool hasI4  = pc.Indices4.Length == n;
+            bool hasCW2 = pc.ComWeights2.Length == n;
 
+            bool logCloth = pc.SubmeshIndex == 7 || pc.SubmeshIndex == 1;
             for (int vi = 0; vi < n; vi++)
             {
-                var w1 = pc.BlendWeights1[vi];
-                var i1 = pc.BlendIndices1.Length > vi ? pc.BlendIndices1[vi] : default;
-                var nd = pc.NormalDepth.Length    > vi ? pc.NormalDepth[vi]  : Vector4.Zero;
+                var cpW1 = pc.CpWeights1[vi];
+                var cpW2 = pc.CpWeights2.Length > vi ? pc.CpWeights2[vi] : Vector4.Zero;
+                var cW1  = pc.ComWeights1[vi];
+                var cW2  = hasCW2 ? pc.ComWeights2[vi] : Vector4.Zero;
+                var i1   = pc.Indices1.Length > vi ? pc.Indices1[vi] : default;
+                var i2   = hasI2 ? pc.Indices2[vi] : default;
+                var i3   = hasI3 ? pc.Indices3[vi] : default;
+                var i4   = hasI4 ? pc.Indices4[vi] : default;
+                var nd   = pc.NormalDepth.Length > vi ? pc.NormalDepth[vi] : Vector4.Zero;
 
-                Vector3 wPos = Vector3.Zero;
-                if (i1.I0 < wCPs.Length) wPos += wCPs[i1.I0] * w1.X;
-                if (i1.I1 < wCPs.Length) wPos += wCPs[i1.I1] * w1.Y;
-                if (i1.I2 < wCPs.Length) wPos += wCPs[i1.I2] * w1.Z;
-                if (i1.I3 < wCPs.Length) wPos += wCPs[i1.I3] * w1.W;
-
-                if (hasW2 && hasI2)
+                // Per-vertex RIVET: BITANGENT = zero → bone-attached vertex (RDB Explorer criterion)
+                if (cpW2.LengthSquared() < 1e-6f)
                 {
-                    var w2 = pc.BlendWeights2[vi];
-                    var i2 = pc.BlendIndices2[vi];
-                    if (i2.I0 < wCPs.Length) wPos += wCPs[i2.I0] * w2.X;
-                    if (i2.I1 < wCPs.Length) wPos += wCPs[i2.I1] * w2.Y;
-                    if (i2.I2 < wCPs.Length) wPos += wCPs[i2.I2] * w2.Z;
-                    if (i2.I3 < wCPs.Length) wPos += wCPs[i2.I3] * w2.W;
+                    sub.Positions[vi] = bonePos + Vector3.Transform(new Vector3(cpW1.X, cpW1.Y, cpW1.Z), boneQuat);
+                    var wn2 = Vector3.Transform(new Vector3(nd.X, nd.Y, nd.Z), boneQuat);
+                    sub.Normals[vi] = wn2.LengthSquared() > 1e-8f ? Vector3.Normalize(wn2) : Vector3.UnitY;
+                    continue;
                 }
 
-                Vector3 localNorm = new(nd.X, nd.Y, nd.Z);
-                float   depth     = nd.W;
-                Vector3 wNorm     = Vector3.TransformNormal(localNorm, boneMat);
-                if (wNorm.LengthSquared() > 1e-6f) wNorm = Vector3.Normalize(wNorm);
-                wPos += wNorm * depth;
+                var u1 = GetClothPoint(i1, cpW1, wCPs);
+                var u2 = GetClothPoint(i2, cpW1, wCPs);
+                var u3 = GetClothPoint(i3, cpW1, wCPs);
+                var u4 = GetClothPoint(i4, cpW1, wCPs);
 
-                sub.Positions[vi] = wPos;
-                sub.Normals[vi]   = wNorm;
+                var v1 = GetClothPoint(i1, cpW2, wCPs);
+                var v2 = GetClothPoint(i2, cpW2, wCPs);
+                var v3 = GetClothPoint(i3, cpW2, wCPs);
+                var v4 = GetClothPoint(i4, cpW2, wCPs);
+
+                var a = u1*cW1.X + u2*cW1.Y + u3*cW1.Z + u4*cW1.W;
+                var c = v1*cW1.X + v2*cW1.Y + v3*cW1.Z + v4*cW1.W;
+
+                Vector3 b = (hasCW2 && cW2.LengthSquared() > 0f)
+                    ? (u1*cW2.X + u2*cW2.Y + u3*cW2.Z + u4*cW2.W)
+                    : a;
+
+                float bLen = b.Length(), cLen = c.Length();
+                if (bLen < 1e-6f || cLen < 1e-6f)
+                {
+                    sub.Positions[vi] = a;
+                    sub.Normals[vi]   = Vector3.UnitY;
+                    continue;
+                }
+                var bN = b / bLen;
+                var cN = c / cLen;
+
+                var crossVec = Vector3.Cross(bN, cN);
+                float crossLen = crossVec.Length();
+                if (crossLen < 1e-6f)
+                {
+                    sub.Positions[vi] = a;
+                    sub.Normals[vi]   = bN;
+                    continue;
+                }
+                var d = crossVec / crossLen;
+
+                sub.Positions[vi] = a + d * nd.W;
+                if (logCloth && vi < 5) AppLogger.Info($"[CLOTH] sm={pc.SubmeshIndex} v{vi} i1=({i1.I0},{i1.I1},{i1.I2},{i1.I3}) cpW1=({cpW1.X:F3},{cpW1.Y:F3},{cpW1.Z:F3},{cpW1.W:F3}) cW1=({cW1.X:F3},{cW1.Y:F3}) a=({a.X:F3},{a.Y:F3},{a.Z:F3}) depth={nd.W:F4} pos=({sub.Positions[vi].X:F3},{sub.Positions[vi].Y:F3},{sub.Positions[vi].Z:F3})");
+
+                var localNorm = new Vector3(nd.X, nd.Y, nd.Z);
+                var wNorm = bN * localNorm.Y + cN * localNorm.X + d * localNorm.Z;
+                sub.Normals[vi] = wNorm.LengthSquared() > 1e-6f ? Vector3.Normalize(wNorm) : d;
             }
         }
     }
+
+    // ── JOINTPALETTES section parser ──────────────────────────────────────────
+
+    // Section 6 format: [count u32] then count palettes, each:
+    //   [pCount u32] [pCount × 12B entries: G1MM_idx(skip) physIdx(skip) jointIdx]
+    // jointIdx may have 0x80000000 flag (physics override); strip it to get actual bone index.
+    private static void ParseJointPalettes(byte[] data, int start, int end, G1mData r)
+    {
+        if (start + 4 > end) return;
+        uint count = ReadU32(data, start);
+        int  pos   = start + 4;
+        for (int i = 0; i < count && pos + 4 <= end; i++)
+        {
+            uint pCount = ReadU32(data, pos); pos += 4;
+            var palette = new uint[pCount];
+            for (int j = 0; j < pCount && pos + 12 <= end; j++, pos += 12)
+            {
+                // [+0] G1MM index (skip), [+4] physics idx (skip), [+8] joint idx
+                uint jointIdx = ReadU32(data, pos + 8);
+                if ((jointIdx & 0x80000000) != 0) jointIdx ^= 0x80000000;
+                palette[j] = jointIdx;
+            }
+            r.BonePalettes.Add(palette);
+        }
+    }
+
+    // ── Rigid mesh LBS transform ──────────────────────────────────────────────
+
+    // Applies bone world matrices to rigid-mesh vertices that were deferred from BuildSubmeshes.
+    // DOA6 stores vertex positions in bone-local space; RDB Explorer's vertex shader applies
+    // pos_out = Σ weight[i] * bone_world[palette[blendIdx/3]] * pos_local directly (not skinning matrices).
+    private static void ApplyRigidSkinning(G1mData r, List<PendingRigidSkin> pending)
+    {
+        foreach (var p in pending)
+        {
+            var sub  = r.Submeshes[p.SubmeshIndex];
+            uint[]? pal = p.BoneMapIndex >= 0 && p.BoneMapIndex < r.BonePalettes.Count
+                          ? r.BonePalettes[p.BoneMapIndex] : null;
+
+            for (int vi = 0; vi < p.RawPositions.Length; vi++)
+            {
+                var rawP = p.RawPositions[vi];
+                var rawN = p.RawNormals[vi];
+                var bw   = p.BlendWeights[vi];
+                var bi   = p.BlendIndices[vi];
+
+                var pos  = Vector3.Zero;
+                var nrm  = Vector3.Zero;
+                float tw = 0f;
+
+                for (int k = 0; k < 4; k++)
+                {
+                    float w = k switch { 0 => bw.X, 1 => bw.Y, 2 => bw.Z, _ => bw.W };
+                    if (w <= 0f) continue;
+                    int rawIdx  = k switch { 0 => bi.I0, 1 => bi.I1, 2 => bi.I2, _ => bi.I3 };
+                    int palIdx  = rawIdx / 3;
+                    int boneIdx = pal != null && (uint)palIdx < (uint)pal.Length ? (int)pal[palIdx] : palIdx;
+                    if ((uint)boneIdx >= (uint)r.Bones.Length) continue;
+
+                    var bone = r.Bones[boneIdx];
+                    pos += Vector3.Transform(rawP, bone.WorldMatrix) * w;
+                    nrm += Vector3.TransformNormal(rawN, bone.WorldMatrix) * w;
+                    tw  += w;
+                }
+
+                if (tw > 1e-4f)
+                {
+                    sub.Positions[vi] = tw < 0.999f ? pos / tw : pos;
+                    float nLen = nrm.Length();
+                    sub.Normals[vi] = nLen > 1e-6f ? nrm / nLen : Vector3.UnitY;
+                }
+                else
+                {
+                    sub.Positions[vi] = rawP;
+                    sub.Normals[vi]   = rawN;
+                }
+            }
+        }
+    }
+
+    private static bool IsZeroIdx(BlendIdx4 idx) =>
+        idx.I0 == 0 && idx.I1 == 0 && idx.I2 == 0 && idx.I3 == 0;
 
     // semantic.BufferIndex → layout.Refs[bufferIndex] → actual vertex buffer
     private static byte[]? GetVertexData(List<VertexBuffer> vbs, LayoutEntry layout, Semantic sem)
@@ -964,9 +1235,22 @@ public static class G1mReader
                       * Matrix4x4.CreateFromQuaternion(b.LocalRotation)
                       * Matrix4x4.CreateTranslation(b.LocalPosition);
 
-            b.WorldMatrix = (b.ParentIndex >= 0 && b.ParentIndex < i)
-                ? local * bones[b.ParentIndex].WorldMatrix
-                : local;
+            if (b.ParentIndex >= 0 && b.ParentIndex < i)
+            {
+                var p = bones[b.ParentIndex];
+                b.WorldMatrix = local * p.WorldMatrix;
+                // Scale-free world transform (RDB Explorer ComputeBoneWorldTransforms):
+                //   worldPos[i] = worldPos[parent] + Transform(localPos, worldRot[parent])
+                //   worldRot[i] = Normalize(worldRot[parent] * localRot)
+                b.WorldPosition   = p.WorldPosition + Vector3.Transform(b.LocalPosition, p.WorldQuaternion);
+                b.WorldQuaternion = Quaternion.Normalize(p.WorldQuaternion * b.LocalRotation);
+            }
+            else
+            {
+                b.WorldMatrix     = local;
+                b.WorldPosition   = b.LocalPosition;
+                b.WorldQuaternion = b.LocalRotation;
+            }
         }
     }
 
@@ -1027,11 +1311,15 @@ public static class G1mReader
     {
         public int         NunoEntryIndex { get; set; }
         public int         SubmeshIndex   { get; set; }
-        public Vector4[]   BlendWeights1  { get; set; } = [];   // POSITION semantic (cpWeights1)
-        public Vector4[]   BlendWeights2  { get; set; } = [];   // BITANGENT semantic (cpWeights2)
-        public BlendIdx4[] BlendIndices1  { get; set; } = [];   // BLENDINDICES semantic (cpIdx1)
-        public BlendIdx4[] BlendIndices2  { get; set; } = [];   // PSIZE semantic (cpIdx2)
-        public Vector4[]   NormalDepth    { get; set; } = [];   // NORMAL semantic (xyz + w=depth)
+        public Vector4[]   CpWeights1  { get; set; } = [];  // POSITION: U-basis blend weights
+        public Vector4[]   CpWeights2  { get; set; } = [];  // BITANGENT: V-basis tangent weights
+        public Vector4[]   ComWeights1 { get; set; } = [];  // BLENDWEIGHT: row combination weights
+        public Vector4[]   ComWeights2 { get; set; } = [];  // COLOR layer1: secondary row weights (optional)
+        public BlendIdx4[] Indices1    { get; set; } = [];  // BLENDINDICES: row 0 CP indices
+        public BlendIdx4[] Indices2    { get; set; } = [];  // PSIZE: row 1 CP indices
+        public BlendIdx4[] Indices3    { get; set; } = [];  // FOG: row 2 CP indices
+        public BlendIdx4[] Indices4    { get; set; } = [];  // TEXCOORD layer5: row 3 CP indices
+        public Vector4[]   NormalDepth { get; set; } = [];  // NORMAL: xyz=localNorm, w=depth
     }
 
     private readonly struct BlendIdx4(int i0, int i1, int i2, int i3)

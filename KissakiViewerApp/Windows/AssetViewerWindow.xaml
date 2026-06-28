@@ -156,7 +156,7 @@
             <helix:HelixViewport3D x:Name="Viewport3D"
                                    Background="#111111"
                                    ShowCoordinateSystem="False"
-                                   ShowViewCube="True"
+                                   ShowViewCube="False"
                                    ZoomExtentsWhenLoaded="False">
                 <helix:HelixViewport3D.Style>
                     <Style TargetType="helix:HelixViewport3D">
@@ -170,8 +170,35 @@
                     </Style>
                 </helix:HelixViewport3D.Style>
                 <helix:DefaultLights/>
+                <ModelVisual3D x:Name="SkyboxRoot"/>
+                <helix:GridLinesVisual3D x:Name="GridViz"
+                                         Width="400" Length="400"
+                                         Thickness="0.5"
+                                         MinorDistance="10"
+                                         MajorDistance="50"
+                                         Fill="#FF606060"/>
+                <ModelVisual3D x:Name="AxesRoot"/>
                 <ModelVisual3D x:Name="SceneRoot"/>
             </helix:HelixViewport3D>
+
+            <!-- Axis gizmo overlay (bottom-right, Y+Forward / Z+Up) -->
+            <Canvas x:Name="GizmoCanvas"
+                    Width="90" Height="90"
+                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                    Margin="0,0,12,12"
+                    Panel.ZIndex="99">
+                <Canvas.Style>
+                    <Style TargetType="Canvas">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                         Value="{x:Static vm:PreviewMode.Model}">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Canvas.Style>
+            </Canvas>
         </Grid>
 
         <!-- Info / slot bar -->

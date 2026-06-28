@@ -1,17 +1,32 @@
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
+using System.Windows.Shapes;
 using HelixToolkit.Wpf;
 using KissakiViewer.Core.Formats;
 using KissakiViewer.ViewModels;
+using SixLabors.ImageSharp.Processing;
 
 namespace KissakiViewer.Windows;
 
 public partial class AssetViewerWindow : Window
 {
     private readonly AssetViewerViewModel _vm;
+
+    // ── Gizmo / skybox state ─────────────────────────────────────────────────
+    private Rect3D    _lastBounds = Rect3D.Empty;
+    private Vector3D  _prevLookDir;
+    private BitmapSource? _skyboxTex;
+
+    private static readonly (string Label, Vector3D Dir, Color Col)[] s_gizmoAxes =
+    {
+        ("X", new Vector3D(1, 0, 0), Color.FromRgb(220, 65,  65)),
+        ("Y", new Vector3D(0, 1, 0), Color.FromRgb( 90, 195, 75)),
+        ("Z", new Vector3D(0, 0, 1), Color.FromRgb( 60, 130, 220)),
+    };
 
     public AssetViewerWindow(
         FdataExtractor extractor,
@@ -23,6 +38,117 @@ public partial class AssetViewerWindow : Window
         _vm = new AssetViewerViewModel(extractor, allG1tByFid, allAssetsByKtid, getG1mMap);
         DataContext = _vm;
         _vm.PropertyChanged += OnVmPropertyChanged;
+
+        Loaded += (_, _) =>
+        {
+            CompositionTarget.Rendering += OnRenderGizmo;
+            _skyboxTex = LoadAndPrepareHdr(
+                System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Images", "defaultHDR.hdr"));
+            BuildSkybox(_skyboxTex); // null → fallback dark color
+            BuildWorldAxes(50);
+        };
+        Unloaded += (_, _) => CompositionTarget.Rendering -= OnRenderGizmo;
+    }
+
+    // ── Gizmo: per-frame update ───────────────────────────────────────────────
+
+    private void OnRenderGizmo(object? sender, EventArgs e)
+    {
+        if (Viewport3D.Camera is ProjectionCamera cam && cam.LookDirection != _prevLookDir)
+        {
+            _prevLookDir = cam.LookDirection;
+            DrawGizmo();
+        }
+    }
+
+    private void DrawGizmo()
+    {
+        GizmoCanvas.Children.Clear();
+        if (Viewport3D.Camera is not ProjectionCamera cam) return;
+
+        var look = cam.LookDirection; look.Normalize();
+        var up   = cam.UpDirection;
+        var right   = Vector3D.CrossProduct(look, up); right.Normalize();
+        var upOrtho = Vector3D.CrossProduct(right, look); upOrtho.Normalize();
+
+        const double CX = 45, CY = 45, ALEN = 30, R_POS = 10, R_NEG = 7;
+
+        // Background disc
+        GizmoCanvas.Children.Add(new Ellipse
+        {
+            Width = 90, Height = 90,
+            Fill = new SolidColorBrush(Color.FromArgb(150, 18, 18, 20)),
+        });
+
+        // Collect all 6 endpoints and sort back-to-front for correct overdraw
+        var pts = new List<(double x, double y, double depth, bool isPos, int axis)>(6);
+        for (int i = 0; i < s_gizmoAxes.Length; i++)
+        {
+            var d = s_gizmoAxes[i].Dir;
+            double sx    = Vector3D.DotProduct(d, right)   * ALEN;
+            double sy    = -Vector3D.DotProduct(d, upOrtho) * ALEN;
+            double depth = Vector3D.DotProduct(d, look);
+            pts.Add((CX + sx, CY + sy,  depth, true,  i));
+            pts.Add((CX - sx, CY - sy, -depth, false, i));
+        }
+        pts.Sort((a, b) => b.depth.CompareTo(a.depth));
+
+        // Axis lines
+        foreach (var (_, dir, col) in s_gizmoAxes)
+        {
+            double sx = Vector3D.DotProduct(dir, right)    * ALEN;
+            double sy = -Vector3D.DotProduct(dir, upOrtho) * ALEN;
+            GizmoCanvas.Children.Add(new Line
+            {
+                X1 = CX, Y1 = CY, X2 = CX + sx, Y2 = CY + sy,
+                StrokeThickness = 1.8,
+                Stroke = new SolidColorBrush(col),
+            });
+        }
+
+        // Circles in depth order
+        foreach (var (x, y, _, isPos, axisIdx) in pts)
+        {
+            var (label, dir, col) = s_gizmoAxes[axisIdx];
+            double r      = isPos ? R_POS : R_NEG;
+            var fillColor = isPos ? col : Color.FromArgb(180, col.R, col.G, col.B);
+
+            var circle = new Ellipse
+            {
+                Width  = r * 2, Height = r * 2,
+                Fill   = new SolidColorBrush(fillColor),
+                Effect = isPos ? new DropShadowEffect
+                {
+                    Color = col, BlurRadius = 6, ShadowDepth = 0, Opacity = 0.45,
+                } : null,
+            };
+            System.Windows.Controls.Canvas.SetLeft(circle, x - r);
+            System.Windows.Controls.Canvas.SetTop (circle, y - r);
+            GizmoCanvas.Children.Add(circle);
+
+            if (isPos)
+            {
+                circle.IsHitTestVisible = false;
+                var tb = new System.Windows.Controls.TextBlock
+                {
+                    Text            = label,
+                    FontSize        = 8.5,
+                    FontWeight      = FontWeights.Bold,
+                    Foreground      = Brushes.White,
+                    IsHitTestVisible = false,
+                };
+                tb.Measure(new System.Windows.Size(20, 20));
+                System.Windows.Controls.Canvas.SetLeft(tb, x - tb.DesiredSize.Width  / 2);
+                System.Windows.Controls.Canvas.SetTop (tb, y - tb.DesiredSize.Height / 2);
+                GizmoCanvas.Children.Add(tb);
+            }
+        }
+
+        // Centre dot
+        var dot = new Ellipse { Width = 4, Height = 4, Fill = Brushes.White, IsHitTestVisible = false };
+        System.Windows.Controls.Canvas.SetLeft(dot, CX - 2);
+        System.Windows.Controls.Canvas.SetTop (dot, CY - 2);
+        GizmoCanvas.Children.Add(dot);
     }
 
     public void OpenAsset(AssetItemViewModel vm)
@@ -62,10 +188,189 @@ public partial class AssetViewerWindow : Window
             _vm.SelectedTab = tab;
     }
 
+    // ── Skybox ────────────────────────────────────────────────────────────────
+
+    private void BuildSkybox(BitmapSource? tex)
+    {
+        const double R = 8000;
+        const int TD = 48, PD = 24;
+        var pts = new Point3DCollection((PD + 1) * (TD + 1));
+        var uvs = new PointCollection((PD + 1) * (TD + 1));
+        var idx = new Int32Collection(PD * TD * 6);
+        for (int pi = 0; pi <= PD; pi++)
+        {
+            double phi = Math.PI * pi / PD;
+            double sp = Math.Sin(phi), cp = Math.Cos(phi);
+            for (int ti = 0; ti <= TD; ti++)
+            {
+                double theta = 2 * Math.PI * ti / TD;
+                pts.Add(new Point3D(sp * Math.Cos(theta) * R, cp * R, sp * Math.Sin(theta) * R));
+                uvs.Add(new System.Windows.Point((double)ti / TD, (double)pi / PD));
+            }
+        }
+        for (int pi = 0; pi < PD; pi++)
+        {
+            for (int ti = 0; ti < TD; ti++)
+            {
+                int p0 = pi * (TD + 1) + ti, p1 = p0 + 1, p2 = p0 + TD + 1, p3 = p2 + 1;
+                // Standard winding; BackMaterial below makes interior faces visible
+                idx.Add(p0); idx.Add(p1); idx.Add(p2);
+                idx.Add(p1); idx.Add(p3); idx.Add(p2);
+            }
+        }
+        var mesh = new MeshGeometry3D { Positions = pts, TextureCoordinates = uvs, TriangleIndices = idx };
+        Brush brush = tex != null
+            ? (Brush)new ImageBrush(tex)
+            : new SolidColorBrush(Color.FromRgb(14, 14, 22));
+        var mat = new EmissiveMaterial(brush);
+        // BackMaterial = rendered when camera is inside the sphere (back face from exterior)
+        SkyboxRoot.Content = new GeometryModel3D(mesh, null) { BackMaterial = mat };
+    }
+
+    // Minimal Radiance RGBE (.hdr) loader with Reinhard tone-map + blur
+    private static BitmapSource? LoadAndPrepareHdr(string path)
+    {
+        if (!System.IO.File.Exists(path)) return null;
+        try
+        {
+            using var fs = System.IO.File.OpenRead(path);
+            // Skip header until blank line
+            while (ReadHdrLine(fs).Length > 0) { }
+            // Resolution string: "-Y H +X W"
+            var res = ReadHdrLine(fs).Split(' ');
+            int srcH = int.Parse(res[1]), srcW = int.Parse(res[3]);
+
+            // Decode all scanlines to float RGB
+            var rgbeRow  = new byte[srcW * 4];
+            var floatRgb = new float[srcW * srcH * 3];
+            for (int y = 0; y < srcH; y++)
+            {
+                ReadRgbeScanline(fs, rgbeRow, srcW);
+                for (int x = 0; x < srcW; x++)
+                {
+                    int qi = x * 4, pi = (y * srcW + x) * 3;
+                    int e = rgbeRow[qi + 3];
+                    if (e != 0)
+                    {
+                        float s = MathF.Pow(2f, e - 128) / 255f;
+                        floatRgb[pi]     = rgbeRow[qi]     * s;
+                        floatRgb[pi + 1] = rgbeRow[qi + 1] * s;
+                        floatRgb[pi + 2] = rgbeRow[qi + 2] * s;
+                    }
+                }
+            }
+
+            // Box-filter downsample → Reinhard tone-map
+            const int OUT_W = 512, OUT_H = 256;
+            float scaleX = (float)srcW / OUT_W, scaleY = (float)srcH / OUT_H;
+            using var ldrImg = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32>(OUT_W, OUT_H);
+            ldrImg.ProcessPixelRows(acc =>
+            {
+                for (int oy = 0; oy < OUT_H; oy++)
+                {
+                    var row = acc.GetRowSpan(oy);
+                    int sy0 = (int)(oy * scaleY), sy1 = Math.Max(sy0 + 1, Math.Min((int)((oy + 1) * scaleY), srcH));
+                    for (int ox = 0; ox < OUT_W; ox++)
+                    {
+                        int sx0 = (int)(ox * scaleX), sx1 = Math.Max(sx0 + 1, Math.Min((int)((ox + 1) * scaleX), srcW));
+                        float r = 0, g = 0, b = 0; int cnt = 0;
+                        for (int sy = sy0; sy < sy1; sy++)
+                            for (int sx = sx0; sx < sx1; sx++)
+                            { int pi = (sy * srcW + sx) * 3; r += floatRgb[pi]; g += floatRgb[pi+1]; b += floatRgb[pi+2]; cnt++; }
+                        if (cnt > 0) { r /= cnt; g /= cnt; b /= cnt; }
+                        row[ox] = new SixLabors.ImageSharp.PixelFormats.Rgba32(
+                            (byte)(r / (1 + r) * 255), (byte)(g / (1 + g) * 255), (byte)(b / (1 + b) * 255), 255);
+                    }
+                }
+            });
+
+            ldrImg.Mutate(ctx => ctx.GaussianBlur(14f));
+
+            // Convert ImageSharp → WPF BitmapSource
+            int stride = OUT_W * 4;
+            var pixBuf = new byte[OUT_H * stride];
+            ldrImg.ProcessPixelRows(acc =>
+            {
+                for (int y = 0; y < OUT_H; y++)
+                {
+                    var row = acc.GetRowSpan(y);
+                    for (int x = 0; x < OUT_W; x++)
+                    { int off = y * stride + x * 4; pixBuf[off] = row[x].B; pixBuf[off+1] = row[x].G; pixBuf[off+2] = row[x].R; pixBuf[off+3] = 255; }
+                }
+            });
+            var bmp = BitmapSource.Create(OUT_W, OUT_H, 96, 96, PixelFormats.Bgra32, null, pixBuf, stride);
+            bmp.Freeze();
+            return bmp;
+        }
+        catch (Exception ex) { AppLogger.Warn($"[Skybox] HDR load failed: {ex.Message}"); return null; }
+    }
+
+    private static string ReadHdrLine(System.IO.Stream s)
+    {
+        var sb = new System.Text.StringBuilder();
+        int c;
+        while ((c = s.ReadByte()) > 0 && c != '\n')
+            if (c != '\r') sb.Append((char)c);
+        return sb.ToString();
+    }
+
+    private static void ReadRgbeScanline(System.IO.Stream s, byte[] buf, int w)
+    {
+        int b0 = s.ReadByte(), b1 = s.ReadByte(), b2 = s.ReadByte(), b3 = s.ReadByte();
+        bool isNewRle = b0 == 0x02 && b1 == 0x02 && (b2 & 0x80) == 0 && ((b2 << 8) | b3) == w;
+        if (isNewRle)
+        {
+            for (int ch = 0; ch < 4; ch++)
+            {
+                int i = 0;
+                while (i < w)
+                {
+                    int code = s.ReadByte();
+                    if (code > 128) { byte val = (byte)s.ReadByte(); int cnt = code - 128; while (cnt-- > 0 && i < w) buf[i++ * 4 + ch] = val; }
+                    else            { while (code-- > 0 && i < w) buf[i++ * 4 + ch] = (byte)s.ReadByte(); }
+                }
+            }
+        }
+        else
+        {
+            buf[0] = (byte)b0; buf[1] = (byte)b1; buf[2] = (byte)b2; buf[3] = (byte)b3;
+            int rem = (w - 1) * 4, off = 4;
+            while (rem > 0) { int n = s.Read(buf, off, rem); if (n <= 0) break; off += n; rem -= n; }
+        }
+    }
+
+    // ── World axis lines at origin ────────────────────────────────────────────
+
+    private void BuildWorldAxes(double axisLen)
+    {
+        AxesRoot.Children.Clear();
+        var axisColors = new (Color col, Vector3D dir)[]
+        {
+            (Color.FromRgb(220, 65,  65),  new Vector3D(1, 0, 0)),  // X red
+            (Color.FromRgb( 90, 195, 75),  new Vector3D(0, 1, 0)),  // Y green
+            (Color.FromRgb( 60, 130, 220), new Vector3D(0, 0, 1)),  // Z blue
+        };
+        foreach (var (col, dir) in axisColors)
+        {
+            AxesRoot.Children.Add(new LinesVisual3D
+            {
+                Color     = col,
+                Thickness = 2.0,
+                Points    = new Point3DCollection
+                {
+                    new Point3D(0, 0, 0),
+                    new Point3D(dir.X * axisLen, dir.Y * axisLen, dir.Z * axisLen),
+                },
+            });
+        }
+    }
+
     // ── 3D Scene ──────────────────────────────────────────────────────────────
 
-    private static Point3D  ToWpf(System.Numerics.Vector3 v) => new(v.Y, -v.Z, v.X);
-    private static Vector3D ToWpfDir(System.Numerics.Vector3 v) => new(v.Y, -v.Z, v.X);
+    // game X=lateral, game Y=up(height), game Z=forward(facing)
+    // → WPF X=game X, WPF Z=game Y(up), WPF Y=-game Z(depth). det=+1 (orientation-preserving)
+    private static Point3D  ToWpf(System.Numerics.Vector3 v) => new(v.X, -v.Z, v.Y);
+    private static Vector3D ToWpfDir(System.Numerics.Vector3 v) => new(v.X, -v.Z, v.Y);
 
     private static readonly DiffuseMaterial s_fallbackMat =
         new(new SolidColorBrush(Color.FromRgb(180, 180, 190)));
@@ -93,7 +398,12 @@ public partial class AssetViewerWindow : Window
         return group;
     }
 
-    private void ClearScene() => SceneRoot.Content = null;
+    private void ClearScene()
+    {
+        SceneRoot.Content = null;
+        _lastBounds = Rect3D.Empty;
+        GizmoCanvas.Children.Clear();
+    }
 
     private void Rebuild3DScene(G1mData model, IReadOnlyDictionary<int, BitmapSource> textures)
     {
@@ -116,9 +426,8 @@ public partial class AssetViewerWindow : Window
             if (sm.Normals.Length == sm.Positions.Length)
             {
                 var norms = new Vector3DCollection(sm.Normals.Length);
-                // Negate normals: ToWpf has det=-1 (LH→RH flip), which reverses normal direction.
-                // Without negation the diffuse lighting hits the inside of every face.
-                foreach (var n in sm.Normals) norms.Add(ToWpfDir(-n));
+                // ToWpf has det=+1 (orientation-preserving) → no normal negation needed
+                foreach (var n in sm.Normals) norms.Add(ToWpfDir(n));
                 mesh.Normals = norms;
             }
 
@@ -145,6 +454,8 @@ public partial class AssetViewerWindow : Window
         SceneRoot.Content = allMeshes.Children.Count > 0 ? allMeshes : null;
 
         var bounds = allMeshes.Bounds;
+        _lastBounds = bounds;
+
         if (!bounds.IsEmpty)
         {
             double maxDim = Math.Max(Math.Max(bounds.SizeX, bounds.SizeY), bounds.SizeZ);
@@ -161,8 +472,10 @@ public partial class AssetViewerWindow : Window
                 UpDirection       = new Vector3D(0, 0, 1),
                 FieldOfView       = 45,
                 NearPlaneDistance = 0.1,
-                FarPlaneDistance  = dist * 10,
+                FarPlaneDistance  = 20000,
             };
         }
+
+        DrawGizmo();
     }
 }
