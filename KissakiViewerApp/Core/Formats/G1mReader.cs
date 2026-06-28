@@ -11,6 +11,10 @@ public sealed class NunoEntry
 {
     public int       ParentBoneId  { get; set; }
     public Vector4[] ControlPoints { get; set; } = [];
+    // Per-CP parent index within this entry (P3 field of NunInfluence).
+    // -1 (== 0xFFFFFFFF as signed) = root CP → parents the skeleton bone.
+    // >= 0 = parents another CP at that index within this entry.
+    public int[]     CpParents     { get; set; } = [];
 }
 
 public sealed class G1mBone
@@ -54,8 +58,12 @@ public sealed class G1mData
     // material index → texture slot bindings from sec 0x10002
     // TexType: 1=COLOR, 2=NORMAL, 3=SPEC, 4=ROUGHNESS, 5=DIRT, ...
     public List<(int MatIdx, int G1tSlot, int UvLayer, int TexType)> MaterialTextures { get; } = [];
-    // G1MS BoneIDList: BoneIdList[nunoParentID] → bone array index
+    // G1MS BoneIDList: BoneIdList[globalID] → internal bone local index
     public ushort[]? BoneIdList { get; set; }
+    // External skeleton support (models with both internal + external G1MS chunks)
+    public bool HasExternalSkeleton { get; set; }
+    public int InternalBoneCount { get; set; }
+    public ushort[]? ExternalBoneIdList { get; set; }
     // G1MG JOINTPALETTES: per-submesh bone palette for LBS skinning
     public List<uint[]> BonePalettes { get; } = new();
 }
@@ -133,6 +141,14 @@ public static class G1mReader
         var pendingRigid = new List<PendingRigidSkin>();
         int pos = (int)headerSize;
 
+        // G1MS selection: prefer internal skeleton (joints[0].parent != 0x80000000).
+        // External skeleton is saved separately so its bones can be merged after internal is read.
+        // ProjectG1M: builds globalToFinal map from all skeletons; we approximate by appending externals.
+        bool      hasInternalG1MS    = false;
+        G1mBone[]? externalBones     = null;
+        ushort[]?  externalBoneIdList = null;
+        uint[]?    externalRawParents = null;
+
         for (int c = 0; c < numChunks && pos + 0xC <= data.Length; c++)
         {
             uint chunkSig  = ReadU32(data, pos);
@@ -146,7 +162,26 @@ public static class G1mReader
                 result.G1mfRaw = new byte[(int)chunkSize];
                 Buffer.BlockCopy(data, pos, result.G1mfRaw, 0, Math.Min((int)chunkSize, data.Length - pos));
             }
-            else if (chunkSig == SIG_G1MS) ReadG1MS(data, pos, result);
+            else if (chunkSig == SIG_G1MS && !hasInternalG1MS)
+            {
+                bool isInternal = IsInternalG1MS(data, pos);
+                if (isInternal)
+                {
+                    ReadG1MS(data, pos, result);
+                    result.InternalBoneCount = result.Bones.Length;
+                    hasInternalG1MS = true;
+                }
+                else if (externalBones == null)
+                {
+                    // Save external skeleton; will be merged after internal is known.
+                    (externalBones, externalBoneIdList, externalRawParents) = ReadG1MSRaw(data, pos);
+                    if (externalBones.Length > 0)
+                    {
+                        result.HasExternalSkeleton = true;
+                        result.ExternalBoneIdList  = externalBoneIdList;
+                    }
+                }
+            }
             else if (chunkSig == SIG_G1MG) ReadG1MG(data, pos, result, pendingCloth, pendingRigid);
             else if (chunkSig == SIG_G1MM)
             {
@@ -158,10 +193,42 @@ public static class G1mReader
             pos = chunkEnd;
         }
 
+        // Merge external skeleton bones (appended after internal).
+        // bit 31 SET on raw parent = internal local index; bit 31 CLEAR = external local index.
+        if (result.HasExternalSkeleton && externalBones != null && externalBones.Length > 0 && result.Bones.Length > 0)
+        {
+            int N = result.InternalBoneCount;
+            for (int i = 0; i < externalBones.Length; i++)
+            {
+                uint rawP = externalRawParents != null && i < externalRawParents.Length
+                            ? externalRawParents[i] : 0xFFFFFFFFu;
+                externalBones[i].ParentIndex =
+                    rawP == 0xFFFFFFFFu          ? -1 :
+                    (rawP & 0x80000000u) != 0    ? (int)(rawP ^ 0x80000000u) :  // → internal[0..N-1]
+                    N + (int)rawP;                                               // → external[N..N+M-1]
+            }
+            result.Bones = [.. result.Bones, .. externalBones];
+            AppLogger.Info($"[G1MS] Merged external: internal={N} external={externalBones.Length} total={result.Bones.Length}");
+        }
+
         ComputeWorldMatrices(result.Bones);
+        AppendNunoBones(result);
         if (pendingRigid.Count > 0) ApplyRigidSkinning(result, pendingRigid);
         if (pendingCloth.Count > 0) ApplyNunoTransform(result, pendingCloth);
         return result;
+    }
+
+    // Returns true if the G1MS chunk at cs has an internal skeleton.
+    // External skeletons have joints[0].parent == 0x80000000 (attaches to outer body skeleton).
+    private static bool IsInternalG1MS(byte[] data, int cs)
+    {
+        if (cs + 0x10 > data.Length) return true;
+        uint version = ReadU32(data, cs + 4);
+        if (version < 0x30303332) return true;           // old format: no external concept
+        uint bonesOffset = ReadU32(data, cs + 0x0C);     // jointInfoOffset
+        int parentPos = cs + (int)bonesOffset + 12;      // joints[0].parent (after 3×f32 scale)
+        if (parentPos + 4 > data.Length) return true;
+        return ReadU32(data, parentPos) != 0x80000000u;
     }
 
     // ── G1MS ─────────────────────────────────────────────────────────────────
@@ -213,6 +280,47 @@ public static class G1mReader
             };
         }
         r.Bones = bones;
+    }
+
+    // Reads G1MS bone data without modifying r. Returns raw parent u32 values for post-merge fix-up.
+    private static (G1mBone[] bones, ushort[] boneIdList, uint[] rawParents) ReadG1MSRaw(byte[] data, int cs)
+    {
+        if (cs + 0x1C > data.Length) return ([], [], []);
+        uint   bonesOffset = ReadU32(data, cs + 0x0C);
+        ushort numBones    = ReadU16(data, cs + 0x14);
+        ushort numIndices  = ReadU16(data, cs + 0x16);
+
+        var boneIdList = new ushort[numIndices];
+        int blPos = cs + 0x1C;
+        for (int i = 0; i < numIndices && blPos + 2 <= data.Length; i++, blPos += 2)
+            boneIdList[i] = ReadU16(data, blPos);
+
+        if (numBones == 0) return ([], boneIdList, []);
+
+        int bp = cs + (int)bonesOffset;
+        var bones      = new G1mBone[numBones];
+        var rawParents = new uint[numBones];
+        for (int i = 0; i < numBones; i++)
+        {
+            int o = bp + i * 0x30;
+            if (o + 0x30 > data.Length) break;
+
+            float sx = ReadF32(data, o + 0x00), sy = ReadF32(data, o + 0x04), sz = ReadF32(data, o + 0x08);
+            uint  rawP = ReadU32(data, o + 0x0C);
+            float rx = ReadF32(data, o + 0x10), ry = ReadF32(data, o + 0x14),
+                  rz = ReadF32(data, o + 0x18), rw = ReadF32(data, o + 0x1C);
+            float px = ReadF32(data, o + 0x20), py = ReadF32(data, o + 0x24), pz = ReadF32(data, o + 0x28);
+
+            rawParents[i] = rawP;
+            bones[i] = new G1mBone
+            {
+                ParentIndex   = -1,  // resolved during merge step
+                LocalPosition = new Vector3(px, py, pz),
+                LocalRotation = new Quaternion(rx, ry, rz, rw),
+                LocalScale    = new Vector3(sx, sy, sz),
+            };
+        }
+        return (bones, boneIdList, rawParents);
     }
 
     // ── G1MG ─────────────────────────────────────────────────────────────────
@@ -723,7 +831,6 @@ public static class G1mReader
 
             if (bwSem != null && biIdxSem != null)
             {
-                // Vertices in bone-local space → defer LBS to ApplyRigidSkinning
                 var bwD = GetVertexData(vbs, layout, bwSem);  int bwS = GetStride(vbs, layout, bwSem);
                 var biD = GetVertexData(vbs, layout, biIdxSem); int biS = GetStride(vbs, layout, biIdxSem);
                 var bws = new Vector4[numVerts];
@@ -810,7 +917,10 @@ public static class G1mReader
                     uint skip2      = ReadU32(data, ep + 16);
                     uint skip3      = ReadU32(data, ep + 20);
 
-                    // dataOffset per RDB Explorer ParseNuno1Entry (version from NUNO outer chunk)
+                    // dataOffset — per ProjectG1M NUNO.h NUNO1 constructor:
+                    //   offset += 24 + 0x3C
+                    //   if version > "0023": offset += 0x10
+                    //   if version >= "0025": offset += 0x10
                     int dataOff = entryStart + 24 + 0x3C;
                     if (outerVersion > NUVER_GT_0023) dataOff += 0x10;
                     if (outerVersion >= NUVER_GE_0025) dataOff += 0x10;
@@ -826,7 +936,19 @@ public static class G1mReader
                         int o = dataOff + k * 16;
                         cps[k] = new Vector4(ReadF32(data, o), ReadF32(data, o+4), ReadF32(data, o+8), ReadF32(data, o+12));
                     }
-                    entries.Add(new NunoEntry { ParentBoneId = (int)parentId, ControlPoints = cps });
+
+                    // Influence data follows immediately after CPs (NunInfluence = 24 bytes each).
+                    // P3 is the 3rd int field (byte offset 8) = per-CP parent index within entry.
+                    // 0xFFFFFFFF (-1 signed) = root CP → parents the NUNO skeleton bone.
+                    int inflBase = dataOff + (int)cpCount * 16;
+                    var cpParents = new int[cpCount];
+                    for (int k = 0; k < cpCount; k++)
+                    {
+                        int io = inflBase + k * 24 + 8;  // P3 at byte 8 within 24-byte NunInfluence
+                        cpParents[k] = (io + 4 <= data.Length) ? ReadI32(data, io) : -1;
+                    }
+
+                    entries.Add(new NunoEntry { ParentBoneId = (int)parentId, ControlPoints = cps, CpParents = cpParents });
 
                     // Advance: re-derive dataOff so ep calculation is self-contained
                     int nextBase = entryStart + 24 + 0x3C;
@@ -873,16 +995,8 @@ public static class G1mReader
             if (nunoIdx < 0 || nunoIdx >= r.NunoEntries.Length) continue;
             var entry = r.NunoEntries[nunoIdx];
 
-            int listIdx = entry.ParentBoneId;
-            int boneId;
-            if (r.BoneIdList != null && (uint)listIdx < (uint)r.BoneIdList.Length)
-            {
-                boneId = r.BoneIdList[listIdx];
-                if (boneId == 0xFFFF) boneId = 0;
-            }
-            else
-                boneId = listIdx;
-            if ((uint)boneId >= (uint)r.Bones.Length) continue;
+            int boneId = ResolveNunoParentBoneId(r, entry.ParentBoneId);
+            if (boneId < 0) continue;
             var bone     = r.Bones[boneId];
             var bonePos  = bone.WorldPosition;
             var boneQuat = bone.WorldQuaternion;
@@ -993,9 +1107,20 @@ public static class G1mReader
             for (int j = 0; j < pCount && pos + 12 <= end; j++, pos += 12)
             {
                 // [+0] G1MM index (skip), [+4] physics idx (skip), [+8] joint idx
+                // ProjectG1M G1MGBonePalette.h: with external skel, bit31 SET → internal local idx,
+                // bit31 CLEAR → external local idx. Without external skel, strip bit31 and use directly.
                 uint jointIdx = ReadU32(data, pos + 8);
-                if ((jointIdx & 0x80000000) != 0) jointIdx ^= 0x80000000;
-                palette[j] = jointIdx;
+                if (r.HasExternalSkeleton)
+                {
+                    palette[j] = (jointIdx & 0x80000000u) != 0
+                        ? jointIdx ^ 0x80000000u                          // internal local index
+                        : (uint)(r.InternalBoneCount + (int)jointIdx);    // external local → N + local
+                }
+                else
+                {
+                    if ((jointIdx & 0x80000000u) != 0) jointIdx ^= 0x80000000u;
+                    palette[j] = jointIdx;
+                }
             }
             r.BonePalettes.Add(palette);
         }
@@ -1003,54 +1128,19 @@ public static class G1mReader
 
     // ── Rigid mesh LBS transform ──────────────────────────────────────────────
 
-    // Applies bone world matrices to rigid-mesh vertices that were deferred from BuildSubmeshes.
-    // DOA6 stores vertex positions in bone-local space; RDB Explorer's vertex shader applies
-    // pos_out = Σ weight[i] * bone_world[palette[blendIdx/3]] * pos_local directly (not skinning matrices).
+    // DOA6 rigid-mesh vertices are stored in model/world space (T-pose bind-pose coordinates).
+    // Standard LBS: v_world = Σ w[i] * (current_bone_world[i] * bind_bone_inverse[i]) * v_model.
+    // In T-pose (current == bind), the skinning matrix collapses to Identity, so v_world == v_model.
+    // We copy raw positions directly, preserving bind-pose world coordinates.
     private static void ApplyRigidSkinning(G1mData r, List<PendingRigidSkin> pending)
     {
         foreach (var p in pending)
         {
-            var sub  = r.Submeshes[p.SubmeshIndex];
-            uint[]? pal = p.BoneMapIndex >= 0 && p.BoneMapIndex < r.BonePalettes.Count
-                          ? r.BonePalettes[p.BoneMapIndex] : null;
-
+            var sub = r.Submeshes[p.SubmeshIndex];
             for (int vi = 0; vi < p.RawPositions.Length; vi++)
             {
-                var rawP = p.RawPositions[vi];
-                var rawN = p.RawNormals[vi];
-                var bw   = p.BlendWeights[vi];
-                var bi   = p.BlendIndices[vi];
-
-                var pos  = Vector3.Zero;
-                var nrm  = Vector3.Zero;
-                float tw = 0f;
-
-                for (int k = 0; k < 4; k++)
-                {
-                    float w = k switch { 0 => bw.X, 1 => bw.Y, 2 => bw.Z, _ => bw.W };
-                    if (w <= 0f) continue;
-                    int rawIdx  = k switch { 0 => bi.I0, 1 => bi.I1, 2 => bi.I2, _ => bi.I3 };
-                    int palIdx  = rawIdx / 3;
-                    int boneIdx = pal != null && (uint)palIdx < (uint)pal.Length ? (int)pal[palIdx] : palIdx;
-                    if ((uint)boneIdx >= (uint)r.Bones.Length) continue;
-
-                    var bone = r.Bones[boneIdx];
-                    pos += Vector3.Transform(rawP, bone.WorldMatrix) * w;
-                    nrm += Vector3.TransformNormal(rawN, bone.WorldMatrix) * w;
-                    tw  += w;
-                }
-
-                if (tw > 1e-4f)
-                {
-                    sub.Positions[vi] = tw < 0.999f ? pos / tw : pos;
-                    float nLen = nrm.Length();
-                    sub.Normals[vi] = nLen > 1e-6f ? nrm / nLen : Vector3.UnitY;
-                }
-                else
-                {
-                    sub.Positions[vi] = rawP;
-                    sub.Normals[vi]   = rawN;
-                }
+                sub.Positions[vi] = p.RawPositions[vi];
+                sub.Normals[vi]   = p.RawNormals[vi];
             }
         }
     }
@@ -1232,7 +1322,100 @@ public static class G1mReader
         };
     }
 
+    // ── NUNO parent bone lookup ───────────────────────────────────────────────
+
+    // Resolves a NUNO entry's raw parentBoneId to a valid index in r.Bones.
+    // Matches ProjectG1M Source.cpp:
+    //   if (nun1.parentID >> 31) nunParentJointID = globalToFinal[nun1.parentID ^ 0x80000000];
+    //   else                     nunParentJointID = globalToFinal[nun1.parentID];
+    // Returns -1 if the bone cannot be resolved.
+    private static int ResolveNunoParentBoneId(G1mData r, int rawParentBoneId)
+    {
+        uint uId     = (uint)rawParentBoneId & 0x7FFFFFFFu;  // strip bit 31 flag
+        int  listIdx = (int)uId;
+
+        // Try internal BoneIdList (globalID → internal local index)
+        if (r.BoneIdList != null && (uint)listIdx < (uint)r.BoneIdList.Length)
+        {
+            int boneId = r.BoneIdList[listIdx];
+            if (boneId != 0xFFFF)
+                return ((uint)boneId < (uint)r.Bones.Length) ? boneId : -1;
+        }
+
+        // Fallback: try external BoneIdList (globalID → external local index → N + local)
+        if (r.HasExternalSkeleton && r.ExternalBoneIdList != null && (uint)listIdx < (uint)r.ExternalBoneIdList.Length)
+        {
+            int extLocal = r.ExternalBoneIdList[listIdx];
+            if (extLocal != 0xFFFF)
+            {
+                int externalIdx = r.InternalBoneCount + extLocal;
+                return (externalIdx < r.Bones.Length) ? externalIdx : -1;
+            }
+        }
+
+        // Single-skeleton fallback: use stripped globalID as direct bone index
+        if (!r.HasExternalSkeleton)
+        {
+            return ((uint)listIdx < (uint)r.Bones.Length) ? listIdx : -1;
+        }
+
+        return -1;
+    }
+
     // ── World matrix ──────────────────────────────────────────────────────────
+
+    // Appends NUNO cloth control points as additional bones after the skeleton bones.
+    // Matches ProjectG1M: jointCount += nun1.controlPoints.size()
+    private static void AppendNunoBones(G1mData r)
+    {
+        if (r.NunoEntries.Length == 0 || r.Bones.Length == 0) return;
+
+        int skelCount = r.Bones.Length;
+        var newBones  = new List<G1mBone>(r.Bones);
+
+        foreach (var entry in r.NunoEntries)
+        {
+            if (entry.ControlPoints.Length == 0) continue;
+
+            int boneId = ResolveNunoParentBoneId(r, entry.ParentBoneId);
+            if (boneId < 0) continue;
+
+            var parentBone = r.Bones[boneId];
+            var bonePos    = parentBone.WorldPosition;
+            var boneQuat   = parentBone.WorldQuaternion;
+            int cpStartIdx = newBones.Count;  // index of first CP bone in this entry
+
+            for (int k = 0; k < entry.ControlPoints.Length; k++)
+            {
+                var cp       = entry.ControlPoints[k];
+                var localPos = new Vector3(cp.X, cp.Y, cp.Z);
+                var worldPos = bonePos + Vector3.Transform(localPos, boneQuat);
+
+                // P3: per-CP parent within entry. -1 (0xFFFFFFFF) = root → parents skeleton bone.
+                int p3           = k < entry.CpParents.Length ? entry.CpParents[k] : -1;
+                int cpParentIdx  = (p3 >= 0 && cpStartIdx + p3 < newBones.Count)
+                                 ? cpStartIdx + p3
+                                 : boneId;
+
+                newBones.Add(new G1mBone
+                {
+                    ParentIndex     = cpParentIdx,
+                    LocalPosition   = localPos,
+                    LocalRotation   = Quaternion.Identity,
+                    LocalScale      = Vector3.One,
+                    WorldPosition   = worldPos,
+                    WorldQuaternion = boneQuat,
+                    WorldMatrix     = Matrix4x4.CreateTranslation(worldPos)
+                });
+            }
+        }
+
+        if (newBones.Count > skelCount)
+        {
+            r.Bones = newBones.ToArray();
+            AppLogger.Info($"[NUNO] Appended {r.Bones.Length - skelCount} CP bones (skeleton={skelCount}, total={r.Bones.Length})");
+        }
+    }
 
     private static void ComputeWorldMatrices(G1mBone[] bones)
     {
