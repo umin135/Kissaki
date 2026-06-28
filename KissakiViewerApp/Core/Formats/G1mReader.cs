@@ -199,14 +199,14 @@ public static class G1mReader
             if (o + 0x30 > data.Length) break;
 
             float sx = ReadF32(data, o + 0x00), sy = ReadF32(data, o + 0x04), sz = ReadF32(data, o + 0x08);
-            ushort parent = ReadU16(data, o + 0x0C);
+            int parent = ReadI32(data, o + 0x0C);   // stored as int32; -1 (0xFFFFFFFF) = root
             float rx = ReadF32(data, o + 0x10), ry = ReadF32(data, o + 0x14),
                   rz = ReadF32(data, o + 0x18), rw = ReadF32(data, o + 0x1C);
             float px = ReadF32(data, o + 0x20), py = ReadF32(data, o + 0x24), pz = ReadF32(data, o + 0x28);
 
             bones[i] = new G1mBone
             {
-                ParentIndex   = parent == 0xFFFF ? -1 : (int)parent,
+                ParentIndex   = parent < 0 ? -1 : parent,
                 LocalPosition = new Vector3(px, py, pz),
                 LocalRotation = new Quaternion(rx, ry, rz, rw),
                 LocalScale    = new Vector3(sx, sy, sz),
@@ -1184,8 +1184,16 @@ public static class G1mReader
 
         return dt switch
         {
-            DT_FLOAT4 => new Vector4(ReadF32(data,o), ReadF32(data,o+4), ReadF32(data,o+8), ReadF32(data,o+12)),
-            DT_FLOAT3 => new Vector4(ReadF32(data,o), ReadF32(data,o+4), ReadF32(data,o+8), 0f),
+            DT_FLOAT4    => new Vector4(ReadF32(data,o), ReadF32(data,o+4), ReadF32(data,o+8), ReadF32(data,o+12)),
+            DT_FLOAT3    => new Vector4(ReadF32(data,o), ReadF32(data,o+4), ReadF32(data,o+8), 0f),
+            // NORMBYTE4: 4 unsigned bytes, each divided by 255 → [0,1] range (blend weights stored compactly)
+            DT_NORMBYTE4 => new Vector4(data[o]/255f, data[o+1]/255f, data[o+2]/255f, data[o+3]/255f),
+            // UBYTE4: raw unsigned bytes (used as-is, e.g. for cloth CP index channels)
+            DT_UBYTE4    => new Vector4(data[o], data[o+1], data[o+2], data[o+3]),
+            // HALF4: 4 packed 16-bit floats
+            DT_HALF4     => o+8 <= data.Length
+                                ? new Vector4(ReadF16(data,o), ReadF16(data,o+2), ReadF16(data,o+4), ReadF16(data,o+6))
+                                : Vector4.Zero,
             _ => Vector4.Zero,
         };
     }
@@ -1320,6 +1328,18 @@ public static class G1mReader
         public BlendIdx4[] Indices3    { get; set; } = [];  // FOG: row 2 CP indices
         public BlendIdx4[] Indices4    { get; set; } = [];  // TEXCOORD layer5: row 3 CP indices
         public Vector4[]   NormalDepth { get; set; } = [];  // NORMAL: xyz=localNorm, w=depth
+    }
+
+    // Stores raw rigid-mesh vertex data; positions are filled in ApplyRigidSkinning
+    // once bone world matrices are ready (after ComputeWorldMatrices).
+    private sealed class PendingRigidSkin
+    {
+        public int         SubmeshIndex { get; set; }
+        public int         BoneMapIndex { get; set; }
+        public Vector3[]   RawPositions { get; set; } = [];
+        public Vector3[]   RawNormals   { get; set; } = [];
+        public Vector4[]   BlendWeights { get; set; } = [];
+        public BlendIdx4[] BlendIndices { get; set; } = [];
     }
 
     private readonly struct BlendIdx4(int i0, int i1, int i2, int i3)

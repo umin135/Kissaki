@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
@@ -20,6 +21,18 @@ public partial class AssetViewerWindow : Window
     private Rect3D    _lastBounds = Rect3D.Empty;
     private Vector3D  _prevLookDir;
     private BitmapSource? _skyboxTex;
+
+    // ── 3D scene tracking ─────────────────────────────────────────────────────
+    // Per-submesh: (geometry, front material, back material, material index)
+    private readonly List<(GeometryModel3D? Geo, Material? FrontMat, Material? BackMat, int MatIdx)> _submeshGeos = [];
+    private AssetTabItem? _subscribedTab;  // tab whose items we hold PropertyChanged refs for
+    private int  _selectedSubmesh  = -1;
+    private int  _selectedMaterial = -1;
+    private bool _suppressSelection;
+
+    // Highlight material: translucent cyan emissive
+    private static readonly Material s_highlightMat = new DiffuseMaterial(
+        new SolidColorBrush(Color.FromArgb(255, 30, 200, 255)) { Opacity = 0.85 });
 
     private static readonly (string Label, Vector3D Dir, Color Col)[] s_gizmoAxes =
     {
@@ -160,19 +173,33 @@ public partial class AssetViewerWindow : Window
     {
         if (e.PropertyName != nameof(AssetViewerViewModel.SelectedTab)) return;
 
+        // Detach from previous tab (if different from the newly subscribed one)
+        if (_subscribedTab != null && _subscribedTab != _vm.SelectedTab)
+        {
+            _subscribedTab.PropertyChanged -= OnTabPropertyChanged;
+            UnsubscribeItemVisibility(_subscribedTab);
+            _subscribedTab = null;
+        }
+
         var tab = _vm.SelectedTab;
         if (tab == null) { ClearScene(); return; }
 
-        tab.PropertyChanged += OnTabPropertyChanged;
+        if (_subscribedTab != tab)
+        {
+            tab.PropertyChanged += OnTabPropertyChanged;
+            _subscribedTab = tab;
+        }
+
         if (tab.G1mData != null)
             Rebuild3DScene(tab.G1mData, tab.ModelTextures);
-        else if (!tab.IsLoading && tab.G1mData == null)
+        else if (!tab.IsLoading)
             ClearScene();
     }
 
     private void OnTabPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (sender is not AssetTabItem tab || tab != _vm.SelectedTab) return;
+
         if (e.PropertyName == nameof(AssetTabItem.G1mData))
         {
             if (tab.G1mData != null)
@@ -180,12 +207,144 @@ public partial class AssetViewerWindow : Window
             else
                 ClearScene();
         }
+        else if (e.PropertyName == nameof(AssetTabItem.ShowBones))
+        {
+            RebuildBoneOverlay(tab.G1mData, tab.ShowBones);
+        }
     }
 
     private void TabHeader_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is FrameworkElement fe && fe.DataContext is AssetTabItem tab)
             _vm.SelectedTab = tab;
+    }
+
+    // ── Detail panel: selection handlers ─────────────────────────────────────
+
+    private void OnSubmeshSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSelection) return;
+
+        // Undo previous material highlight
+        if (_selectedMaterial >= 0) { HighlightByMaterial(_selectedMaterial, false); _selectedMaterial = -1; }
+        if (_selectedSubmesh  >= 0) { HighlightSubmesh(_selectedSubmesh,  false); _selectedSubmesh  = -1; }
+
+        _suppressSelection = true;
+        MaterialListBox.SelectedItem = null;
+        _suppressSelection = false;
+
+        var item = SubmeshListBox.SelectedItem as SubmeshItemVM;
+        _selectedSubmesh = item?.Index ?? -1;
+        if (_selectedSubmesh >= 0) HighlightSubmesh(_selectedSubmesh, true);
+    }
+
+    private void OnMaterialSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSelection) return;
+
+        // Undo previous highlights
+        if (_selectedSubmesh  >= 0) { HighlightSubmesh(_selectedSubmesh, false);      _selectedSubmesh  = -1; }
+        if (_selectedMaterial >= 0) { HighlightByMaterial(_selectedMaterial, false);  _selectedMaterial = -1; }
+
+        _suppressSelection = true;
+        SubmeshListBox.SelectedItem = null;
+        _suppressSelection = false;
+
+        var item = MaterialListBox.SelectedItem as MaterialSlotItemVM;
+        _selectedMaterial = item?.Index ?? -1;
+        if (_selectedMaterial >= 0) HighlightByMaterial(_selectedMaterial, true);
+    }
+
+    // ── Detail panel: item visibility event ──────────────────────────────────
+
+    private void OnSubmeshItemPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is SubmeshItemVM item && e.PropertyName == nameof(SubmeshItemVM.IsVisible))
+            SetSubmeshVisible(item.Index, item.IsVisible);
+    }
+
+    private void SubscribeItemVisibility(AssetTabItem tab)
+    {
+        foreach (var item in tab.SubmeshItems)
+            item.PropertyChanged += OnSubmeshItemPropertyChanged;
+    }
+
+    private void UnsubscribeItemVisibility(AssetTabItem tab)
+    {
+        foreach (var item in tab.SubmeshItems)
+            item.PropertyChanged -= OnSubmeshItemPropertyChanged;
+    }
+
+    // ── 3D scene helpers: visibility and highlight ────────────────────────────
+
+    private void SetSubmeshVisible(int idx, bool visible)
+    {
+        if ((uint)idx >= (uint)_submeshGeos.Count) return;
+        var (geo, frontMat, backMat, _) = _submeshGeos[idx];
+        if (geo == null) return;
+        bool highlighted = idx == _selectedSubmesh;
+        geo.Material     = visible ? (highlighted ? s_highlightMat : frontMat) : null;
+        geo.BackMaterial = visible ? (highlighted ? s_highlightMat : backMat)  : null;
+    }
+
+    private void HighlightSubmesh(int idx, bool highlight)
+    {
+        if ((uint)idx >= (uint)_submeshGeos.Count) return;
+        var (geo, frontMat, backMat, _) = _submeshGeos[idx];
+        if (geo == null) return;
+        bool visible = geo.Material != null || !highlight;  // if material is null it's hidden
+        if (!visible && !highlight) return;
+        geo.Material     = highlight ? s_highlightMat : frontMat;
+        geo.BackMaterial = highlight ? s_highlightMat : backMat;
+    }
+
+    private void HighlightByMaterial(int matIdx, bool highlight)
+    {
+        for (int i = 0; i < _submeshGeos.Count; i++)
+        {
+            var (geo, frontMat, backMat, m) = _submeshGeos[i];
+            if (geo == null || m != matIdx) continue;
+            geo.Material     = highlight ? s_highlightMat : frontMat;
+            geo.BackMaterial = highlight ? s_highlightMat : backMat;
+        }
+    }
+
+    // ── Bone overlay ──────────────────────────────────────────────────────────
+
+    private void RebuildBoneOverlay(G1mData? model, bool showBones)
+    {
+        BoneRoot.Children.Clear();
+        if (!showBones || model == null || model.Bones.Length == 0) return;
+
+        // Bone connection lines
+        var linePoints = new Point3DCollection();
+        foreach (var bone in model.Bones)
+        {
+            if (bone.ParentIndex >= 0 && bone.ParentIndex < model.Bones.Length)
+            {
+                linePoints.Add(ToWpf(model.Bones[bone.ParentIndex].WorldPosition));
+                linePoints.Add(ToWpf(bone.WorldPosition));
+            }
+        }
+        if (linePoints.Count > 0)
+            BoneRoot.Children.Add(new LinesVisual3D
+            {
+                Points    = linePoints,
+                Color     = Color.FromArgb(220, 255, 210, 30),
+                Thickness = 1.5,
+            });
+
+        // Joint position points
+        var jointPoints = new Point3DCollection(model.Bones.Length);
+        foreach (var bone in model.Bones)
+            jointPoints.Add(ToWpf(bone.WorldPosition));
+        if (jointPoints.Count > 0)
+            BoneRoot.Children.Add(new PointsVisual3D
+            {
+                Points = jointPoints,
+                Color  = Color.FromArgb(255, 255, 90, 90),
+                Size   = 5,
+            });
     }
 
     // ── Skybox ────────────────────────────────────────────────────────────────
@@ -400,18 +559,50 @@ public partial class AssetViewerWindow : Window
 
     private void ClearScene()
     {
+        // Unsubscribe item visibility events
+        if (_subscribedTab != null)
+        {
+            UnsubscribeItemVisibility(_subscribedTab);
+        }
+
+        _submeshGeos.Clear();
+        _selectedSubmesh  = -1;
+        _selectedMaterial = -1;
+
+        _suppressSelection = true;
+        if (SubmeshListBox  != null) SubmeshListBox.SelectedItem  = null;
+        if (MaterialListBox != null) MaterialListBox.SelectedItem = null;
+        _suppressSelection = false;
+
         SceneRoot.Content = null;
+        BoneRoot.Children.Clear();
         _lastBounds = Rect3D.Empty;
         GizmoCanvas.Children.Clear();
     }
 
     private void Rebuild3DScene(G1mData model, IReadOnlyDictionary<int, BitmapSource> textures)
     {
+        // Clear previous state
+        if (_subscribedTab != null) UnsubscribeItemVisibility(_subscribedTab);
+        _submeshGeos.Clear();
+        _selectedSubmesh  = -1;
+        _selectedMaterial = -1;
+
+        _suppressSelection = true;
+        if (SubmeshListBox  != null) SubmeshListBox.SelectedItem  = null;
+        if (MaterialListBox != null) MaterialListBox.SelectedItem = null;
+        _suppressSelection = false;
+
         var allMeshes = new Model3DGroup();
 
-        foreach (var sm in model.Submeshes)
+        for (int smIdx = 0; smIdx < model.Submeshes.Length; smIdx++)
         {
-            if (sm.Positions.Length == 0 || sm.Indices.Length == 0) continue;
+            var sm = model.Submeshes[smIdx];
+            if (sm.Positions.Length == 0 || sm.Indices.Length == 0)
+            {
+                _submeshGeos.Add((null, null, null, sm.MaterialIndex));
+                continue;
+            }
 
             var mesh = new MeshGeometry3D();
 
@@ -431,27 +622,34 @@ public partial class AssetViewerWindow : Window
                 mesh.Normals = norms;
             }
 
-            // Always use channel 0 for rendering — 'layer' semantics need Blender verification
-            var rawUvs = sm.TexCoords;
-
-            if (rawUvs.Length > 0)
+            // Always use channel 0 for rendering
+            if (sm.TexCoords.Length > 0)
             {
-                var uvs = new PointCollection(rawUvs.Length);
-                foreach (var uv in rawUvs) uvs.Add(new System.Windows.Point(uv.X, uv.Y));
+                var uvs = new PointCollection(sm.TexCoords.Length);
+                foreach (var uv in sm.TexCoords) uvs.Add(new System.Windows.Point(uv.X, uv.Y));
                 mesh.TextureCoordinates = uvs;
             }
 
-            int matIdx = sm.MaterialIndex;
-            textures.TryGetValue(matIdx, out var tex);
-            var material = MakeMeshMaterial(tex);
-
-            allMeshes.Children.Add(new GeometryModel3D(mesh, material)
-            {
-                BackMaterial = MakeMeshMaterial(tex),
-            });
+            textures.TryGetValue(sm.MaterialIndex, out var tex);
+            var frontMat = MakeMeshMaterial(tex);
+            var backMat  = MakeMeshMaterial(tex);
+            var geo = new GeometryModel3D(mesh, frontMat) { BackMaterial = backMat };
+            allMeshes.Children.Add(geo);
+            _submeshGeos.Add((geo, frontMat, backMat, sm.MaterialIndex));
         }
 
         SceneRoot.Content = allMeshes.Children.Count > 0 ? allMeshes : null;
+
+        // Re-subscribe item visibility events for current tab
+        var tab = _vm.SelectedTab;
+        if (tab != null)
+        {
+            _subscribedTab = tab;
+            SubscribeItemVisibility(tab);
+        }
+
+        // Bone overlay
+        RebuildBoneOverlay(model, tab?.ShowBones ?? false);
 
         var bounds = allMeshes.Bounds;
         _lastBounds = bounds;

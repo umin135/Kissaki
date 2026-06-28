@@ -12,6 +12,30 @@ namespace KissakiViewer.ViewModels;
 // ── Preview mode enum ─────────────────────────────────────────────────────────
 public enum PreviewMode { None, Texture, Model, Json }
 
+// ── Submesh detail item (for 3D detail panel) ─────────────────────────────────
+public sealed partial class SubmeshItemVM : ObservableObject
+{
+    public int    Index         { get; }
+    public int    MaterialIndex { get; }
+    public string Name          => $"SubMesh {Index}";
+
+    [ObservableProperty] private bool _isVisible = true;
+
+    public SubmeshItemVM(int index, int materialIndex)
+    {
+        Index         = index;
+        MaterialIndex = materialIndex;
+    }
+}
+
+// ── Material slot detail item ─────────────────────────────────────────────────
+public sealed class MaterialSlotItemVM
+{
+    public int    Index { get; }
+    public string Name  => $"Material {Index}";
+    public MaterialSlotItemVM(int index) => Index = index;
+}
+
 // ── Slot helper (mirrors what MainViewModel used to have) ─────────────────────
 internal record SlotBitmap(int Slot, BitmapSource Bmp, string Info);
 
@@ -51,7 +75,10 @@ public sealed partial class AssetTabItem : ObservableObject
     }
 
     // ── Preview mode (single source of truth for content-area switching) ─────
-    [ObservableProperty] private PreviewMode _previewMode = PreviewMode.None;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsModelMode))]
+    private PreviewMode _previewMode = PreviewMode.None;
+    public bool IsModelMode => PreviewMode == PreviewMode.Model;
 
     // ── JSON / text preview (KTID, MTL, GRP, …) ───────────────────────────────
     [ObservableProperty] private string _jsonText = string.Empty;
@@ -68,6 +95,11 @@ public sealed partial class AssetTabItem : ObservableObject
     private Dictionary<int, BitmapSource> _modelTextures = [];
     public  IReadOnlyDictionary<int, BitmapSource> ModelTextures => _modelTextures;
     internal void SetModelTextures(Dictionary<int, BitmapSource> tex) => _modelTextures = tex;
+
+    // ── 3D detail panel ────────────────────────────────────────────────────────
+    [ObservableProperty] private bool _showBones;
+    public ObservableCollection<SubmeshItemVM>    SubmeshItems  { get; } = [];
+    public ObservableCollection<MaterialSlotItemVM> MaterialItems { get; } = [];
 
     public AssetTabItem(AssetItemViewModel asset) => Asset = asset;
 }
@@ -403,6 +435,16 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         Application.Current.Dispatcher.Invoke(() =>
         {
             tab.SetModelTextures(textures);
+
+            // Populate detail-panel lists before setting G1mData so the window
+            // can subscribe to item events in its OnTabPropertyChanged handler.
+            tab.SubmeshItems.Clear();
+            tab.MaterialItems.Clear();
+            for (int i = 0; i < model.Submeshes.Length; i++)
+                tab.SubmeshItems.Add(new SubmeshItemVM(i, model.Submeshes[i].MaterialIndex));
+            foreach (var mi in model.Submeshes.Select(s => s.MaterialIndex).Distinct().OrderBy(x => x))
+                tab.MaterialItems.Add(new MaterialSlotItemVM(mi));
+
             tab.G1mData     = model;
             tab.PreviewMode = PreviewMode.Model;
             tab.IsLoading   = false;
