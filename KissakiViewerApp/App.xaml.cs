@@ -10,6 +10,12 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        DispatcherUnhandledException += (_, args) =>
+        {
+            AppLogger.Exception("DispatcherUnhandledException", args.Exception);
+            args.Handled = true;
+        };
+
         // Prevent OnLastWindowClose from killing the app while the launcher is closing
         // but before MainWindow is shown (no windows open in that gap).
         ShutdownMode = ShutdownMode.OnExplicitShutdown;

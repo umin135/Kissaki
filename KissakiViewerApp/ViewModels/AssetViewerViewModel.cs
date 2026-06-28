@@ -194,6 +194,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            AppLogger.Exception($"LoadAsset {tab.Asset?.TypeExt}", ex);
             tab.StatusText = $"오류: {ex.Message}";
             tab.IsLoading  = false;
         }

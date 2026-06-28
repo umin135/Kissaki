@@ -155,12 +155,12 @@ public static class G1tDecoder
                 if (extSize >= 0x10 && ep + 20 + 4 <= data.Length)
                 {
                     uint ow = ReadU32(data, ep + 20);
-                    if (ow > 0) w = ow;
+                    if (ow > 0 && ow <= 65536) w = ow;  // reject garbage from non-standard extSize layouts
                 }
                 if (extSize >= 0x14 && ep + 24 + 4 <= data.Length)
                 {
                     uint oh = ReadU32(data, ep + 24);
-                    if (oh > 0) h = oh;
+                    if (oh > 0 && oh <= 65536) h = oh;
                 }
             }
 

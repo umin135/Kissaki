@@ -657,6 +657,7 @@ public partial class AssetViewerWindow : Window
         if (!bounds.IsEmpty)
         {
             double maxDim = Math.Max(Math.Max(bounds.SizeX, bounds.SizeY), bounds.SizeZ);
+            if (maxDim < 1e-6) maxDim = 1.0;  // guard: degenerate mesh (all verts at same point)
             var center    = new Point3D(
                 bounds.X + bounds.SizeX / 2,
                 bounds.Y + bounds.SizeY / 2,
