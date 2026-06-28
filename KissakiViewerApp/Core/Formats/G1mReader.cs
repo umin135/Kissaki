@@ -1021,7 +1021,6 @@ public static class G1mReader
             bool hasI4  = pc.Indices4.Length == n;
             bool hasCW2 = pc.ComWeights2.Length == n;
 
-            bool logCloth = pc.SubmeshIndex == 7 || pc.SubmeshIndex == 1;
             for (int vi = 0; vi < n; vi++)
             {
                 var cpW1 = pc.CpWeights1[vi];
@@ -1081,7 +1080,6 @@ public static class G1mReader
                 var d = crossVec / crossLen;
 
                 sub.Positions[vi] = a + d * nd.W;
-                if (logCloth && vi < 5) AppLogger.Info($"[CLOTH] sm={pc.SubmeshIndex} v{vi} i1=({i1.I0},{i1.I1},{i1.I2},{i1.I3}) cpW1=({cpW1.X:F3},{cpW1.Y:F3},{cpW1.Z:F3},{cpW1.W:F3}) cW1=({cW1.X:F3},{cW1.Y:F3}) a=({a.X:F3},{a.Y:F3},{a.Z:F3}) depth={nd.W:F4} pos=({sub.Positions[vi].X:F3},{sub.Positions[vi].Y:F3},{sub.Positions[vi].Z:F3})");
 
                 var localNorm = new Vector3(nd.X, nd.Y, nd.Z);
                 var wNorm = bN * localNorm.Y + cN * localNorm.X + d * localNorm.Z;
