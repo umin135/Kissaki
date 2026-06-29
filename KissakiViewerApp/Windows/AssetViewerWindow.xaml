@@ -158,6 +158,7 @@
                                          SelectionChanged="OnSubmeshSelectionChanged"
                                          Background="Transparent"
                                          BorderThickness="0"
+                                         ScrollViewer.VerticalScrollBarVisibility="Disabled"
                                          ItemContainerStyle="{StaticResource DetailListItemStyle}">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate DataType="{x:Type vm:SubmeshItemVM}">
@@ -207,6 +208,7 @@
                                          SelectionChanged="OnMaterialSelectionChanged"
                                          Background="Transparent"
                                          BorderThickness="0"
+                                         ScrollViewer.VerticalScrollBarVisibility="Disabled"
                                          ItemContainerStyle="{StaticResource DetailListItemStyle}">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate DataType="{x:Type vm:MaterialSlotItemVM}">
@@ -316,7 +318,8 @@
                                        Background="#111111"
                                        ShowCoordinateSystem="False"
                                        ShowViewCube="False"
-                                       ZoomExtentsWhenLoaded="False">
+                                       ZoomExtentsWhenLoaded="False"
+                                       ContextMenu="{x:Null}">
                     <helix:HelixViewport3D.Style>
                         <Style TargetType="helix:HelixViewport3D">
                             <Setter Property="Visibility" Value="Collapsed"/>

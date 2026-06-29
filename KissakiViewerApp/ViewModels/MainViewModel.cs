@@ -381,7 +381,7 @@ public sealed partial class MainViewModel : ObservableObject
                             AppLogger.Info($"[SaveModel] Saved texture: {texName}");
 
                             // Map every material that references this slot
-                            foreach (var (matIdx, slot, _, _) in model.MaterialTextures)
+                            foreach (var (matIdx, slot, _, _, _, _) in model.MaterialTextures)
                                 if (slot == globalSlot)
                                     matTexPaths.TryAdd(matIdx, texName);
                         }

@@ -23,7 +23,7 @@ public partial class AssetViewerWindow : Window
     private BitmapSource? _skyboxTex;
 
     // ── 3D scene tracking ─────────────────────────────────────────────────────
-    // Per-submesh: (geometry, front material, back material, material index)
+    // Per-submesh: (geometry, front material, _, material index)  — BackMaterial always null (backface culled)
     private readonly List<(GeometryModel3D? Geo, Material? FrontMat, Material? BackMat, int MatIdx)> _submeshGeos = [];
     private AssetTabItem? _subscribedTab;  // tab whose items we hold PropertyChanged refs for
     private int  _selectedSubmesh  = -1;
@@ -31,7 +31,8 @@ public partial class AssetViewerWindow : Window
     private bool _suppressSelection;
 
     // ── UV map viewer ─────────────────────────────────────────────────────────
-    private readonly Dictionary<int, int> _matUvLayers = new();
+    private readonly Dictionary<int, int>              _matUvLayers  = new();
+    private readonly Dictionary<int, (float X, float Y)> _matUvTiling = new();
 
     private static readonly Color[] s_uvPalette =
     [
@@ -72,6 +73,8 @@ public partial class AssetViewerWindow : Window
                 System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Images", "defaultHDR.hdr"));
             BuildSkybox(_skyboxTex); // null → fallback dark color
             BuildWorldAxes(50);
+            // Hide cursor during right-click rotation (SizeAll is the default and distracting)
+            Viewport3D.CameraController.RotateCursor = Cursors.None;
         };
         Unloaded += (_, _) => CompositionTarget.Rendering -= OnRenderGizmo;
     }
@@ -295,32 +298,29 @@ public partial class AssetViewerWindow : Window
     private void SetSubmeshVisible(int idx, bool visible)
     {
         if ((uint)idx >= (uint)_submeshGeos.Count) return;
-        var (geo, frontMat, backMat, _) = _submeshGeos[idx];
+        var (geo, frontMat, _, _) = _submeshGeos[idx];
         if (geo == null) return;
         bool highlighted = idx == _selectedSubmesh;
-        geo.Material     = visible ? (highlighted ? s_highlightMat : frontMat) : null;
-        geo.BackMaterial = visible ? (highlighted ? s_highlightMat : backMat)  : null;
+        geo.Material = visible ? (highlighted ? s_highlightMat : frontMat) : null;
     }
 
     private void HighlightSubmesh(int idx, bool highlight)
     {
         if ((uint)idx >= (uint)_submeshGeos.Count) return;
-        var (geo, frontMat, backMat, _) = _submeshGeos[idx];
+        var (geo, frontMat, _, _) = _submeshGeos[idx];
         if (geo == null) return;
-        bool visible = geo.Material != null || !highlight;  // if material is null it's hidden
+        bool visible = geo.Material != null || !highlight;
         if (!visible && !highlight) return;
-        geo.Material     = highlight ? s_highlightMat : frontMat;
-        geo.BackMaterial = highlight ? s_highlightMat : backMat;
+        geo.Material = highlight ? s_highlightMat : frontMat;
     }
 
     private void HighlightByMaterial(int matIdx, bool highlight)
     {
         for (int i = 0; i < _submeshGeos.Count; i++)
         {
-            var (geo, frontMat, backMat, m) = _submeshGeos[i];
+            var (geo, frontMat, _, m) = _submeshGeos[i];
             if (geo == null || m != matIdx) continue;
-            geo.Material     = highlight ? s_highlightMat : frontMat;
-            geo.BackMaterial = highlight ? s_highlightMat : backMat;
+            geo.Material = highlight ? s_highlightMat : frontMat;
         }
     }
 
@@ -552,14 +552,47 @@ public partial class AssetViewerWindow : Window
     private static readonly SpecularMaterial s_specMat =
         new(new SolidColorBrush(Color.FromRgb(60, 60, 80)), 30);
 
+    // Returns true if the Bgra32 BitmapSource contains any pixels with alpha < 250.
+    // Samples every 16th pixel for speed; good enough for hair/cloth transparency detection.
+    private static bool TextureHasTransparency(BitmapSource bmp)
+    {
+        if (bmp.Format != PixelFormats.Bgra32 && bmp.Format != PixelFormats.Pbgra32) return false;
+        int stride = bmp.PixelWidth * 4;
+        var pixels = new byte[stride * bmp.PixelHeight];
+        bmp.CopyPixels(pixels, stride, 0);
+        for (int i = 3; i < pixels.Length; i += 64) // alpha byte of every 16th BGRA pixel
+            if (pixels[i] < 250) return true;
+        return false;
+    }
+
     private static Material MakeMeshMaterial(BitmapSource? tex)
     {
         var group = new MaterialGroup();
         if (tex != null)
         {
-            var ib = new ImageBrush(tex) { TileMode = TileMode.Tile, Stretch = Stretch.Fill };
-            var emit = new EmissiveMaterial(new ImageBrush(tex) { TileMode = TileMode.Tile, Stretch = Stretch.Fill })
-            { Color = Color.FromRgb(200, 200, 200) };
+            // ViewportUnits=Absolute: UV (0,0)→(1,1) maps directly to the texture regardless
+            // of each submesh's UV bounding box (the RelativeToBoundingBox default stretches
+            // the texture to fit each submesh's UV extents, giving wrong texture regions).
+            //
+            // Always Opacity=1.0 (fully opaque from WPF's perspective): WPF's transparent pass
+            // sorts by bounding sphere center, which is wrong for 50+ overlapping hair strands.
+            // Per-pixel alpha from the ImageBrush still works, and the depth buffer handles
+            // correct per-pixel ordering. Render order (opaque mat first, alpha-tex mat last)
+            // ensures the hat/body renders before hair without needing the transparent pass.
+            var ib = new ImageBrush(tex)
+            {
+                TileMode = TileMode.Tile,
+                Stretch = Stretch.Fill,
+                ViewportUnits = BrushMappingMode.Absolute,
+                Viewport = new Rect(0, 0, 1, 1),
+            };
+            var emit = new EmissiveMaterial(new ImageBrush(tex)
+            {
+                TileMode = TileMode.Tile,
+                Stretch = Stretch.Fill,
+                ViewportUnits = BrushMappingMode.Absolute,
+                Viewport = new Rect(0, 0, 1, 1),
+            }) { Color = Color.FromRgb(200, 200, 200) };
             var diff = new DiffuseMaterial(ib);
             group.Children.Add(emit);
             group.Children.Add(diff);
@@ -568,7 +601,6 @@ public partial class AssetViewerWindow : Window
         {
             group.Children.Add(s_fallbackMat);
         }
-        group.Children.Add(s_specMat);
         return group;
     }
 
@@ -594,6 +626,7 @@ public partial class AssetViewerWindow : Window
         _lastBounds = Rect3D.Empty;
         GizmoCanvas.Children.Clear();
         _matUvLayers.Clear();
+        _matUvTiling.Clear();
         if (UvMapCanvas  != null) UvMapCanvas.Children.Clear();
         if (UvMapImage   != null) UvMapImage.Source = null;
     }
@@ -613,10 +646,27 @@ public partial class AssetViewerWindow : Window
 
         var allMeshes = new Model3DGroup();
 
-        // Build matIdx → uvLayer from MaterialTextures (TexType==1 = BaseColor)
+        // Detect which material textures have real alpha pixels (e.g. hair, cloth).
+        // Transparent meshes must be added to allMeshes AFTER opaque ones so WPF's depth
+        // sort renders them correctly and the body shows through transparent hair gaps.
+        var alphaMatIds = new HashSet<int>();
+        foreach (var (matIdx, bmp) in textures)
+            if (TextureHasTransparency(bmp)) alphaMatIds.Add(matIdx);
+
+        var pendingOpaque = new List<GeometryModel3D>();
+        var pendingAlpha  = new List<GeometryModel3D>();
+
+        // Build matIdx → uvLayer / tiling from MaterialTextures (TexType==1 = BaseColor)
         _matUvLayers.Clear();
-        foreach (var (matIdx, _, uvLayer, texType) in model.MaterialTextures)
-            if (texType == 1) _matUvLayers.TryAdd(matIdx, uvLayer);
+        _matUvTiling.Clear();
+        foreach (var (matIdx, _, uvLayer, texType, tileX, tileY) in model.MaterialTextures)
+        {
+            if (texType == 1)
+            {
+                _matUvLayers.TryAdd(matIdx, uvLayer);
+                _matUvTiling.TryAdd(matIdx, (tileX > 0 ? tileX : 1f, tileY > 0 ? tileY : 1f));
+            }
+        }
 
         for (int smIdx = 0; smIdx < model.Submeshes.Length; smIdx++)
         {
@@ -626,7 +676,6 @@ public partial class AssetViewerWindow : Window
                 _submeshGeos.Add((null, null, null, sm.MaterialIndex));
                 continue;
             }
-
             var mesh = new MeshGeometry3D();
 
             var pts = new Point3DCollection(sm.Positions.Length);
@@ -647,6 +696,10 @@ public partial class AssetViewerWindow : Window
 
             int uvCh = _matUvLayers.TryGetValue(sm.MaterialIndex, out var ch) ? ch : 0;
             var uvSrc = uvCh < sm.AllTexCoords.Length ? sm.AllTexCoords[uvCh] : sm.TexCoords;
+            {
+                string firstUv = uvSrc.Length > 0 ? $"({uvSrc[0].X:F3},{uvSrc[0].Y:F3})" : "none";
+                AppLogger.Info($"[3D] SM[{smIdx}] cloth={sm.ClothId} mat={sm.MaterialIndex} uvCh={uvCh} allUvLen={sm.AllTexCoords.Length} uvSrcLen={uvSrc.Length} uv0={firstUv}");
+            }
             if (uvSrc.Length > 0)
             {
                 var uvs = new PointCollection(uvSrc.Length);
@@ -655,12 +708,23 @@ public partial class AssetViewerWindow : Window
             }
 
             textures.TryGetValue(sm.MaterialIndex, out var tex);
+            AppLogger.Info($"[3D] SM[{smIdx}] tex={(tex != null ? $"{tex.PixelWidth}x{tex.PixelHeight}" : "NULL")}");
+
+            bool hasAlpha = alphaMatIds.Contains(sm.MaterialIndex);
+            AppLogger.Info($"[3D] SM[{smIdx}] mat={sm.MaterialIndex} cloth={sm.ClothId} hasAlpha={hasAlpha}");
             var frontMat = MakeMeshMaterial(tex);
-            var backMat  = MakeMeshMaterial(tex);
+            // Cloth (ClothId==1) is a single-layer mesh with no flipped duplicate → two-sided.
+            // Rigid/physics meshes have a flipped-normal copy for the back face → cull.
+            Material? backMat = sm.ClothId == 1 ? MakeMeshMaterial(tex) : null;
             var geo = new GeometryModel3D(mesh, frontMat) { BackMaterial = backMat };
-            allMeshes.Children.Add(geo);
             _submeshGeos.Add((geo, frontMat, backMat, sm.MaterialIndex));
+            if (hasAlpha) pendingAlpha.Add(geo);
+            else          pendingOpaque.Add(geo);
         }
+
+        // Opaque first, then transparent — correct depth-sort order for WPF 3D
+        foreach (var g in pendingOpaque) allMeshes.Children.Add(g);
+        foreach (var g in pendingAlpha)  allMeshes.Children.Add(g);
 
         SceneRoot.Content = allMeshes.Children.Count > 0 ? allMeshes : null;
 
@@ -727,11 +791,29 @@ public partial class AssetViewerWindow : Window
             if (smOnly >= 0 && si != smOnly) continue;
             var sm = model.Submeshes[si];
             if (matIdx >= 0 && sm.MaterialIndex != matIdx) continue;
-            if (sm.Indices.Length < 3) continue;
 
-            int uvCh = _matUvLayers.TryGetValue(sm.MaterialIndex, out var c) ? c : 0;
-            var uvSrc = uvCh < sm.AllTexCoords.Length ? sm.AllTexCoords[uvCh] : sm.TexCoords;
-            if (uvSrc.Length == 0) continue;
+            // Prefer UV from the actual rendered MeshGeometry3D so the UV map
+            // reflects exactly what WPF is drawing, not just parsed data.
+            MeshGeometry3D? mesh3d = si < _submeshGeos.Count
+                ? _submeshGeos[si].Geo?.Geometry as MeshGeometry3D
+                : null;
+            PointCollection?   texCoords  = mesh3d?.TextureCoordinates;
+            Int32Collection?   triIndices = mesh3d?.TriangleIndices;
+            bool useRendered = texCoords is { Count: > 0 } && triIndices is { Count: >= 3 };
+
+            // Fallback to parsed UV when geometry is null (skipped submesh)
+            System.Windows.Point[]? uvFallback  = null;
+            int[]?                  idxFallback = null;
+            if (!useRendered)
+            {
+                int uvCh = _matUvLayers.TryGetValue(sm.MaterialIndex, out var c) ? c : 0;
+                var uvSrc = uvCh < sm.AllTexCoords.Length ? sm.AllTexCoords[uvCh] : sm.TexCoords;
+                if (uvSrc.Length == 0 || sm.Indices.Length < 3) continue;
+                var pts = new System.Windows.Point[uvSrc.Length];
+                for (int k = 0; k < uvSrc.Length; k++) pts[k] = new System.Windows.Point(uvSrc[k].X, uvSrc[k].Y);
+                uvFallback  = pts;
+                idxFallback = sm.Indices;
+            }
 
             var col = s_uvPalette[ci++ % s_uvPalette.Length];
             var brush = new SolidColorBrush(Color.FromArgb(204, col.R, col.G, col.B));
@@ -739,13 +821,29 @@ public partial class AssetViewerWindow : Window
             var geo = new StreamGeometry();
             using (var ctx = geo.Open())
             {
-                for (int fi = 0; fi + 2 < sm.Indices.Length; fi += 3)
+                if (useRendered)
                 {
-                    int i0 = sm.Indices[fi], i1 = sm.Indices[fi + 1], i2 = sm.Indices[fi + 2];
-                    if ((uint)i0 >= (uint)uvSrc.Length || (uint)i1 >= (uint)uvSrc.Length || (uint)i2 >= (uint)uvSrc.Length) continue;
-                    ctx.BeginFigure(new System.Windows.Point(uvSrc[i0].X * sz, uvSrc[i0].Y * sz), false, true);
-                    ctx.LineTo(new System.Windows.Point(uvSrc[i1].X * sz, uvSrc[i1].Y * sz), true, false);
-                    ctx.LineTo(new System.Windows.Point(uvSrc[i2].X * sz, uvSrc[i2].Y * sz), true, false);
+                    int n = texCoords!.Count;
+                    for (int fi = 0; fi + 2 < triIndices!.Count; fi += 3)
+                    {
+                        int i0 = triIndices[fi], i1 = triIndices[fi + 1], i2 = triIndices[fi + 2];
+                        if ((uint)i0 >= (uint)n || (uint)i1 >= (uint)n || (uint)i2 >= (uint)n) continue;
+                        ctx.BeginFigure(new System.Windows.Point(texCoords[i0].X * sz, texCoords[i0].Y * sz), false, true);
+                        ctx.LineTo(new System.Windows.Point(texCoords[i1].X * sz, texCoords[i1].Y * sz), true, false);
+                        ctx.LineTo(new System.Windows.Point(texCoords[i2].X * sz, texCoords[i2].Y * sz), true, false);
+                    }
+                }
+                else
+                {
+                    int n = uvFallback!.Length;
+                    for (int fi = 0; fi + 2 < idxFallback!.Length; fi += 3)
+                    {
+                        int i0 = idxFallback[fi], i1 = idxFallback[fi + 1], i2 = idxFallback[fi + 2];
+                        if ((uint)i0 >= (uint)n || (uint)i1 >= (uint)n || (uint)i2 >= (uint)n) continue;
+                        ctx.BeginFigure(new System.Windows.Point(uvFallback[i0].X * sz, uvFallback[i0].Y * sz), false, true);
+                        ctx.LineTo(new System.Windows.Point(uvFallback[i1].X * sz, uvFallback[i1].Y * sz), true, false);
+                        ctx.LineTo(new System.Windows.Point(uvFallback[i2].X * sz, uvFallback[i2].Y * sz), true, false);
+                    }
                 }
             }
             geo.Freeze();

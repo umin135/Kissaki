@@ -344,10 +344,13 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             if (ct.IsCancellationRequested) return;
 
             // Resolve G1T: kidsobjdb map → co-located → proximity fallback
-            List<AssetItemViewModel> g1tFileList =
-                kidsG1ts is { Count: > 0 }  ? kidsG1ts  :
-                colocated.Count > 0         ? colocated :
-                ResolveG1tByProximity(rec.FdataId);
+            string g1tSrc;
+            List<AssetItemViewModel> g1tFileList;
+            if (kidsG1ts is { Count: > 0 }) { g1tFileList = kidsG1ts; g1tSrc = "kidsobjdb"; }
+            else if (colocated.Count > 0)   { g1tFileList = colocated; g1tSrc = "colocated"; }
+            else                            { g1tFileList = ResolveG1tByProximity(rec.FdataId); g1tSrc = "proximity"; }
+
+            AppLogger.Info($"[3D] G1T src={g1tSrc} count={g1tFileList.Count} model=0x{rec.FileKtid:X8}");
 
             if (g1tFileList.Count == 0) return;
 
@@ -356,13 +359,18 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             var g1tRawCache = new Dictionary<int, byte[]>();
             try
             {
-                byte[] first = _extractor.ExtractToMemory(g1tFileList[0].Record, g1tFileList[0].Container);
-                g1tRawCache[0] = first;
-                var firstInfo = G1tDecoder.Survey(first);
-                if (firstInfo.Version == "1600")
+                var firstVm = g1tFileList[0];
+                if (firstVm != null)
                 {
-                    int rc = firstInfo.Textures.Count(t => t.FmtCode != 0);
-                    if (rc > 1) texPerFile = rc;
+                    byte[] first = _extractor.ExtractToMemory(firstVm.Record, firstVm.Container);
+                    g1tRawCache[0] = first;
+                    var firstInfo = G1tDecoder.Survey(first);
+                    if (firstInfo.Version == "1600")
+                    {
+                        int rc = firstInfo.Textures.Count(t => t.FmtCode != 0);
+                        if (rc > 1) texPerFile = rc;
+                    }
+                    AppLogger.Info($"[3D] G1T[0] ver={firstInfo.Version} texPerFile={texPerFile}");
                 }
             }
             catch { }
@@ -375,6 +383,8 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 .Where(s => s >= 0 && s / texPerFile < g1tFileList.Count)
                 .OrderBy(s => s).ToList();
             if (distinctSlots.Count == 0) distinctSlots = [0];
+
+            AppLogger.Info($"[3D] COLOR slots={string.Join(",", distinctSlots)} (matTexCount={model.MaterialTextures.Count})");
 
             var slotDict = new Dictionary<int, SixLabors.ImageSharp.Image<Rgba32>>();
 
@@ -427,6 +437,10 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 }
             }
             foreach (var img in slotDict.Values.Where(v => v != null)) img!.Dispose();
+
+            AppLogger.Info($"[3D] texBitmaps keys=[{string.Join(",", texBitmaps.Keys.OrderBy(k=>k))}]");
+            foreach (var (matIdx, g1tSlot) in model.MaterialTextures.Where(x => x.TexType == 1).Select(x => (x.MatIdx, x.G1tSlot)))
+                AppLogger.Info($"[3D]   mat[{matIdx}] slot={g1tSlot} → {(texBitmaps.ContainsKey(matIdx) ? "OK" : "MISSING")}");
 
             textures = texBitmaps;
         }, ct);

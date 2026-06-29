@@ -39,6 +39,8 @@ public sealed class G1mSubmesh
     public int[]       Indices       { get; set; } = [];
     public int         MaterialIndex { get; set; } = -1;
     public uint        MatPalId      { get; set; }
+    // 0=rigid, 1=NUNO cloth (overlaps rigid mesh with different UV), 2=physics cloth
+    public int         ClothId       { get; set; }
 }
 
 public sealed class G1mData
@@ -57,7 +59,8 @@ public sealed class G1mData
     public Dictionary<uint, byte[]> G1mgSectionRaw { get; } = [];
     // material index → texture slot bindings from sec 0x10002
     // TexType: 1=COLOR, 2=NORMAL, 3=SPEC, 4=ROUGHNESS, 5=DIRT, ...
-    public List<(int MatIdx, int G1tSlot, int UvLayer, int TexType)> MaterialTextures { get; } = [];
+    // TileX/TileY: texture repeat counts (e.g. 4 = tile 4× in U/V; apply before sampling)
+    public List<(int MatIdx, int G1tSlot, int UvLayer, int TexType, int TileX, int TileY)> MaterialTextures { get; } = [];
     // G1MS BoneIDList: BoneIdList[globalID] → internal bone local index
     public ushort[]? BoneIdList { get; set; }
     // External skeleton support (models with both internal + external G1MS chunks)
@@ -433,7 +436,9 @@ public static class G1mReader
                 ushort texIndex = ReadU16(data, pos + 0);
                 ushort uvLayer  = ReadU16(data, pos + 2);
                 ushort texType  = ReadU16(data, pos + 4);
-                r.MaterialTextures.Add((matIdx, (int)texIndex, (int)uvLayer, (int)texType));
+                ushort tileX    = ReadU16(data, pos + 8);
+                ushort tileY    = ReadU16(data, pos + 10);
+                r.MaterialTextures.Add((matIdx, (int)texIndex, (int)uvLayer, (int)texType, (int)tileX, (int)tileY));
             }
         }
     }
@@ -806,6 +811,7 @@ public static class G1mReader
                     Indices       = indices,
                     MaterialIndex = rs.Material,
                     MatPalId      = rs.MatPalId,
+                    ClothId       = 1,
                 });
 
                 int nunoIdx = extId >= 20000 ? extId % 20000 : extId;
@@ -857,6 +863,7 @@ public static class G1mReader
                     Indices       = indices,
                     MaterialIndex = rs.Material,
                     MatPalId      = rs.MatPalId,
+                    ClothId       = clothId,
                 });
                 pendingRigid.Add(new PendingRigidSkin
                 {
@@ -880,6 +887,7 @@ public static class G1mReader
                     Indices       = indices,
                     MaterialIndex = rs.Material,
                     MatPalId      = rs.MatPalId,
+                    ClothId       = clothId,
                 });
             }
         }
