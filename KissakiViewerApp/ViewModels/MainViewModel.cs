@@ -671,8 +671,11 @@ public sealed partial class MainViewModel : ObservableObject
                     { IsUnknown: true } => assets.Where(a =>
                         string.IsNullOrEmpty(GetEffectiveFolderPath(a, restoreNames))),
                     FolderNode fn      => assets.Where(a =>
-                        GetEffectiveFolderPath(a, restoreNames)
-                            .StartsWith(fn.FullPath, StringComparison.OrdinalIgnoreCase)),
+                    {
+                        string fp = GetEffectiveFolderPath(a, restoreNames);
+                        return fp.Equals(fn.FullPath, StringComparison.OrdinalIgnoreCase) ||
+                               fp.StartsWith(fn.FullPath + "/", StringComparison.OrdinalIgnoreCase);
+                    }),
                 };
 
                 return source.Where(a =>
