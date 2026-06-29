@@ -368,7 +368,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             catch { }
 
             IEnumerable<int> neededSlots = model.MaterialTextures.Count > 0
-                ? model.MaterialTextures.Select(x => x.G1tSlot)
+                ? model.MaterialTextures.Where(x => x.TexType == 1).Select(x => x.G1tSlot)
                 : model.Submeshes.Select(s => s.MaterialIndex).Distinct();
 
             var distinctSlots = neededSlots.Distinct()
@@ -411,7 +411,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
 
             // Build matIdx → BitmapSource
             IEnumerable<(int matIdx, int g1tSlot)> assignments = model.MaterialTextures.Count > 0
-                ? model.MaterialTextures.Select(x => (x.MatIdx, x.G1tSlot))
+                ? model.MaterialTextures.Where(x => x.TexType == 1).Select(x => (x.MatIdx, x.G1tSlot))
                 : model.Submeshes.Select(s => (s.MaterialIndex, s.MaterialIndex)).Distinct();
 
             var texBitmaps = new Dictionary<int, BitmapSource>();

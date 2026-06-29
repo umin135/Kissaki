@@ -66,6 +66,9 @@ public sealed class G1mData
     public ushort[]? ExternalBoneIdList { get; set; }
     // G1MG JOINTPALETTES: per-submesh bone palette for LBS skinning
     public List<uint[]> BonePalettes { get; } = new();
+    // G1MG JOINTPALETTES physics palette: per-palette physics bone indices (for clothId=2 submeshes)
+    // Built from physIdx & 0xFFFF (middle field of each 12-byte entry).
+    public List<uint[]> PhysicsPalettes { get; } = new();
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────────
@@ -672,7 +675,7 @@ public static class G1mReader
             int clothId = ci.clothId;
             int extId   = ci.extId;
 
-            if (clothId == 2) continue;  // physics cloth: skip (no NUNO transform defined)
+            // clothId=2 (physics cloth) has the same vertex layout as clothId=0: falls through to rigid path.
 
             if (rs.VertexBufRef < 0 || rs.VertexBufRef >= layouts.Count) continue;
             if (rs.IndexBufRef  < 0 || rs.IndexBufRef  >= ibs.Count) continue;
@@ -710,13 +713,16 @@ public static class G1mReader
 
             if (clothId == 1)
             {
-                // NUNO cloth deformation (RDB Explorer formula):
-                //   cpWeights1 = POSITION (U-basis blend weights, sum~1)
-                //   cpWeights2 = BITANGENT (V-basis tangent weights, sum~0)
-                //   comWeights1 = BLENDWEIGHT (row combination weights)
-                //   comWeights2 = COLOR layer1 (secondary row combination, optional)
-                //   idx1..4     = BLENDINDICES / PSIZE / FOG / TEXCOORD-layer5 (CP index sets)
-                //   normalDepth = NORMAL (xyz=localNorm, w=depth)
+                // NUNO cloth deformation channel mapping (EG1MGVASemantic enum, confirmed from ProjectG1M):
+                //   G1MG semantic 0 (Position)    = POSITION  → cpW1 (U-basis blend weights, FLOAT4, sum~1)
+                //   G1MG semantic 1 (JointWeight) = NORMAL    → cW1  (row combination weights, FLOAT4)
+                //   G1MG semantic 2 (JointIndex)  = BLENDWEIGHT → idx1 (row 0 CP indices, UBYTE4)
+                //   G1MG semantic 3 (Normal)      = BLENDINDICES → normalDepth (xyz=norm, w=depth, FLOAT4)
+                //   G1MG semantic 4 (PSize)       = PSIZE     → idx2 (row 1 CP indices, UBYTE4)
+                //   G1MG semantic 5 (UV) L5 UByte = TEXCOORD5 → idx4 (row 3 CP indices, UBYTE4)
+                //   G1MG semantic 7 (Binormal)    = BITANGENT → cpW2 (V-basis tangent weights, FLOAT4)
+                //   G1MG semantic 10 (Color) L≠0  = COLOR     → cW2  (secondary row weights, FLOAT4)
+                //   G1MG semantic 11 (Fog)        = FOG       → idx3 (row 2 CP indices, UBYTE4)
                 // For each vertex: u_k = GetPoint(idx_k, cpW1); v_k = GetPoint(idx_k, cpW2)
                 //   a = Σ(u_k × cW1_k); c = Σ(v_k × cW1_k)
                 //   b = Σ(u_k × cW2_k) if COLOR_1 else a
@@ -725,9 +731,10 @@ public static class G1mReader
 
                 Semantic? cpW1Sem = layout.Semantics.FirstOrDefault(s => s.Type == SEM_POSITION);
                 Semantic? cpW2Sem = layout.Semantics.FirstOrDefault(s => s.Type == SEM_BITANGENT);
-                Semantic? cW1Sem  = layout.Semantics.FirstOrDefault(s => s.Type == SEM_BLENDWEIGHT);
+                Semantic? cW1Sem  = layout.Semantics.FirstOrDefault(s => s.Type == SEM_BLENDWEIGHT);   // type=1: row combination weights (FLOAT4)
                 Semantic? cW2Sem  = layout.Semantics.FirstOrDefault(s => s.Type == SEM_COLOR && s.Layer == 1);
-                // biIdxSem = idx1 (already found above)
+                Semantic? i1Sem   = layout.Semantics.FirstOrDefault(s => s.Type == SEM_BLENDINDICES); // type=2: CP row-0 indices (UBYTE4)
+                Semantic? ndSem   = layout.Semantics.FirstOrDefault(s => s.Type == SEM_NORMAL);       // type=3: normal xyz + depth w (FLOAT4)
                 Semantic? i2Sem   = layout.Semantics.FirstOrDefault(s => s.Type == SEM_PSIZE);
                 Semantic? i3Sem   = layout.Semantics.FirstOrDefault(s => s.Type == SEM_FOG);
                 Semantic? i4Sem   = layout.Semantics.FirstOrDefault(s => s.Type == SEM_TEXCOORD && s.Layer == 5 && s.DataType == DT_UBYTE4);
@@ -741,11 +748,11 @@ public static class G1mReader
                 byte[]? cpW2D = VD(vbs, layout, cpW2Sem); int cpW2S = ST(vbs, layout, cpW2Sem);
                 byte[]? cW1D  = VD(vbs, layout, cW1Sem);  int cW1St = ST(vbs, layout, cW1Sem);
                 byte[]? cW2D  = VD(vbs, layout, cW2Sem);  int cW2St = ST(vbs, layout, cW2Sem);
-                byte[]? i1D   = VD(vbs, layout, biIdxSem);int i1S   = ST(vbs, layout, biIdxSem);
+                byte[]? i1D   = VD(vbs, layout, i1Sem);   int i1S   = ST(vbs, layout, i1Sem);
                 byte[]? i2D   = VD(vbs, layout, i2Sem);   int i2S   = ST(vbs, layout, i2Sem);
                 byte[]? i3D   = VD(vbs, layout, i3Sem);   int i3S   = ST(vbs, layout, i3Sem);
                 byte[]? i4D   = VD(vbs, layout, i4Sem);   int i4S   = ST(vbs, layout, i4Sem);
-                byte[]? ndD   = VD(vbs, layout, normSem);  int ndS   = ST(vbs, layout, normSem);
+                byte[]? ndD   = VD(vbs, layout, ndSem);   int ndS   = ST(vbs, layout, ndSem);
 
                 var cpW1Arr = new Vector4[numVerts];
                 var cpW2Arr = new Vector4[numVerts];
@@ -761,20 +768,20 @@ public static class G1mReader
                 ushort cpW2Dt = cpW2Sem?.DataType ?? DT_FLOAT4;
                 ushort cW1Dt  = cW1Sem?.DataType  ?? DT_FLOAT4;
                 ushort cW2Dt  = cW2Sem?.DataType  ?? DT_FLOAT4;
-                ushort i1Dt   = biIdxSem?.DataType ?? DT_UBYTE4;
+                ushort i1Dt   = i1Sem?.DataType    ?? DT_UBYTE4;
                 ushort i2Dt   = i2Sem?.DataType   ?? DT_UBYTE4;
                 ushort i3Dt   = i3Sem?.DataType   ?? DT_UBYTE4;
                 ushort i4Dt   = i4Sem?.DataType   ?? DT_UBYTE4;
-                ushort ndDt   = normSem?.DataType  ?? DT_FLOAT4;
+                ushort ndDt   = ndSem?.DataType    ?? DT_FLOAT4;
                 int cpW1Of = cpW1Sem?.Offset ?? 0;
                 int cpW2Of = cpW2Sem?.Offset ?? 0;
                 int cW1Of  = cW1Sem?.Offset  ?? 0;
                 int cW2Of  = cW2Sem?.Offset  ?? 0;
-                int i1Of   = biIdxSem?.Offset ?? 0;
+                int i1Of   = i1Sem?.Offset    ?? 0;
                 int i2Of   = i2Sem?.Offset   ?? 0;
                 int i3Of   = i3Sem?.Offset   ?? 0;
                 int i4Of   = i4Sem?.Offset   ?? 0;
-                int ndOf   = normSem?.Offset  ?? 0;
+                int ndOf   = ndSem?.Offset    ?? 0;
 
                 for (int vi = 0; vi < numVerts; vi++)
                 {
@@ -855,6 +862,7 @@ public static class G1mReader
                 {
                     SubmeshIndex = subIdx,
                     BoneMapIndex = rs.BoneMapIndex,
+                    ClothId      = clothId,
                     RawPositions = rawPos,
                     RawNormals   = rawNorm,
                     BlendWeights = bws,
@@ -962,9 +970,6 @@ public static class G1mReader
         }
 
         r.NunoEntries = [.. entries];
-        AppLogger.Info($"[NUNO] Parsed {entries.Count} NUNO1 entries");
-        for (int i = 0; i < entries.Count; i++)
-            AppLogger.Info($"[NUNO]   [{i}] parentId={entries[i].ParentBoneId} cpCount={entries[i].ControlPoints.Length}");
     }
 
     // ── NUNO cloth vertex transform ───────────────────────────────────────────
@@ -1055,44 +1060,41 @@ public static class G1mReader
                 var a = u1*cW1.X + u2*cW1.Y + u3*cW1.Z + u4*cW1.W;
                 var c = v1*cW1.X + v2*cW1.Y + v3*cW1.Z + v4*cW1.W;
 
-                Vector3 b = (hasCW2 && cW2.LengthSquared() > 0f)
+                // b = Σ(u_k * cW2_k). If cW2=0, b=0 → d=0 → finalPos=a (no spike).
+                // Do NOT fall back to b=a; a×c would be enormous and cause spikes.
+                Vector3 b = hasCW2
                     ? (u1*cW2.X + u2*cW2.Y + u3*cW2.Z + u4*cW2.W)
-                    : a;
+                    : Vector3.Zero;
 
-                float bLen = b.Length(), cLen = c.Length();
-                if (bLen < 1e-6f || cLen < 1e-6f)
+                // ProjectG1M Source.cpp line 1780: d = b.Cross(c), NOT normalized.
+                var d = Vector3.Cross(b, c);
+
+                if (d.LengthSquared() < 1e-12f)
                 {
                     sub.Positions[vi] = a;
                     sub.Normals[vi]   = Vector3.UnitY;
                     continue;
                 }
-                var bN = b / bLen;
-                var cN = c / cLen;
 
-                var crossVec = Vector3.Cross(bN, cN);
-                float crossLen = crossVec.Length();
-                if (crossLen < 1e-6f)
-                {
-                    sub.Positions[vi] = a;
-                    sub.Normals[vi]   = bN;
-                    continue;
-                }
-                var d = crossVec / crossLen;
+                var finalPos = a + d * nd.W;
 
-                sub.Positions[vi] = a + d * nd.W;
+                sub.Positions[vi] = finalPos;
 
+                // Source.cpp line 1783: normal = b*ny + c*nx + d*nz, then normalize.
                 var localNorm = new Vector3(nd.X, nd.Y, nd.Z);
-                var wNorm = bN * localNorm.Y + cN * localNorm.X + d * localNorm.Z;
-                sub.Normals[vi] = wNorm.LengthSquared() > 1e-6f ? Vector3.Normalize(wNorm) : d;
+                var wNorm = b * localNorm.Y + c * localNorm.X + d * localNorm.Z;
+                sub.Normals[vi] = wNorm.LengthSquared() > 1e-6f ? Vector3.Normalize(wNorm) : Vector3.Normalize(d);
             }
+
         }
     }
 
     // ── JOINTPALETTES section parser ──────────────────────────────────────────
 
     // Section 6 format: [count u32] then count palettes, each:
-    //   [pCount u32] [pCount × 12B entries: G1MM_idx(skip) physIdx(skip) jointIdx]
+    //   [pCount u32] [pCount × 12B entries: G1MM_idx(skip) physIdx jointIdx]
     // jointIdx may have 0x80000000 flag (physics override); strip it to get actual bone index.
+    // physIdx & 0xFFFF → PhysicsPalettes entry used by clothId=2 submeshes.
     private static void ParseJointPalettes(byte[] data, int start, int end, G1mData r)
     {
         if (start + 4 > end) return;
@@ -1101,13 +1103,16 @@ public static class G1mReader
         for (int i = 0; i < count && pos + 4 <= end; i++)
         {
             uint pCount = ReadU32(data, pos); pos += 4;
-            var palette = new uint[pCount];
+            var palette     = new uint[pCount];
+            var physPalette = new uint[pCount];
             for (int j = 0; j < pCount && pos + 12 <= end; j++, pos += 12)
             {
-                // [+0] G1MM index (skip), [+4] physics idx (skip), [+8] joint idx
+                // [+0] G1MM index (skip), [+4] physics idx, [+8] joint idx
                 // ProjectG1M G1MGBonePalette.h: with external skel, bit31 SET → internal local idx,
                 // bit31 CLEAR → external local idx. Without external skel, strip bit31 and use directly.
+                uint physIdx  = ReadU32(data, pos + 4);
                 uint jointIdx = ReadU32(data, pos + 8);
+                physPalette[j] = physIdx & 0xFFFF;
                 if (r.HasExternalSkeleton)
                 {
                     palette[j] = (jointIdx & 0x80000000u) != 0
@@ -1121,6 +1126,7 @@ public static class G1mReader
                 }
             }
             r.BonePalettes.Add(palette);
+            r.PhysicsPalettes.Add(physPalette);
         }
     }
 
@@ -1130,11 +1136,48 @@ public static class G1mReader
     // Standard LBS: v_world = Σ w[i] * (current_bone_world[i] * bind_bone_inverse[i]) * v_model.
     // In T-pose (current == bind), the skinning matrix collapses to Identity, so v_world == v_model.
     // We copy raw positions directly, preserving bind-pose world coordinates.
+    //
+    // Exception — clothId==2 (physics cloth): vertices are stored in cloth simulation local space.
+    // Each vertex has a blend index encoding which physics bone it attaches to (index / 3).
+    // The physics bone global index comes from PhysicsPalettes (built from physIdx & 0xFFFF
+    // in the JOINTPALETTE middle field). Transform: worldPos + Rotate(v_local, worldRot).
+    // Reference: RDB Explorer G1MImporter.cs clothId==2 branch.
     private static void ApplyRigidSkinning(G1mData r, List<PendingRigidSkin> pending)
     {
         foreach (var p in pending)
         {
             var sub = r.Submeshes[p.SubmeshIndex];
+
+            if (p.ClothId == 2 && p.BoneMapIndex >= 0 && p.BoneMapIndex < r.PhysicsPalettes.Count)
+            {
+                uint[] physPal = r.PhysicsPalettes[p.BoneMapIndex];
+                for (int vi = 0; vi < p.RawPositions.Length; vi++)
+                {
+                    int localIdx = (int)Math.Round(p.BlendIndices[vi].I0 / 3.0);
+                    if ((uint)localIdx < (uint)physPal.Length)
+                    {
+                        uint gbIdx = physPal[localIdx];
+                        if (gbIdx < (uint)r.Bones.Length)
+                        {
+                            var bone    = r.Bones[(int)gbIdx];
+                            sub.Positions[vi] = bone.WorldPosition + Vector3.Transform(p.RawPositions[vi], bone.WorldQuaternion);
+                            var rawNorm = p.RawNormals[vi];
+                            if (rawNorm != Vector3.Zero)
+                            {
+                                var rn = Vector3.Transform(rawNorm, bone.WorldQuaternion);
+                                sub.Normals[vi] = rn.LengthSquared() > 1e-6f ? Vector3.Normalize(rn) : rawNorm;
+                            }
+                            continue;
+                        }
+                    }
+                    // Fallback: no valid physics bone — copy raw
+                    sub.Positions[vi] = p.RawPositions[vi];
+                    sub.Normals[vi]   = p.RawNormals[vi];
+                }
+                continue;
+            }
+
+            // Standard rigid: T-pose bind-pose world coordinates — copy raw
             for (int vi = 0; vi < p.RawPositions.Length; vi++)
             {
                 sub.Positions[vi] = p.RawPositions[vi];
@@ -1411,7 +1454,6 @@ public static class G1mReader
         if (newBones.Count > skelCount)
         {
             r.Bones = newBones.ToArray();
-            AppLogger.Info($"[NUNO] Appended {r.Bones.Length - skelCount} CP bones (skeleton={skelCount}, total={r.Bones.Length})");
         }
     }
 
@@ -1517,6 +1559,7 @@ public static class G1mReader
     {
         public int         SubmeshIndex { get; set; }
         public int         BoneMapIndex { get; set; }
+        public int         ClothId      { get; set; }
         public Vector3[]   RawPositions { get; set; } = [];
         public Vector3[]   RawNormals   { get; set; } = [];
         public Vector4[]   BlendWeights { get; set; } = [];

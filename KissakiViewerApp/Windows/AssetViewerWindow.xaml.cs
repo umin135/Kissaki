@@ -30,6 +30,19 @@ public partial class AssetViewerWindow : Window
     private int  _selectedMaterial = -1;
     private bool _suppressSelection;
 
+    // ── UV map viewer ─────────────────────────────────────────────────────────
+    private readonly Dictionary<int, int> _matUvLayers = new();
+
+    private static readonly Color[] s_uvPalette =
+    [
+        Color.FromRgb(  0, 220, 220),  // cyan
+        Color.FromRgb(220, 220,   0),  // yellow
+        Color.FromRgb(  0, 210,  80),  // green
+        Color.FromRgb(220, 100,   0),  // orange
+        Color.FromRgb(210,   0, 210),  // magenta
+        Color.FromRgb(255, 255, 255),  // white
+    ];
+
     // Highlight material: translucent cyan emissive
     private static readonly Material s_highlightMat = new DiffuseMaterial(
         new SolidColorBrush(Color.FromArgb(255, 30, 200, 255)) { Opacity = 0.85 });
@@ -236,6 +249,7 @@ public partial class AssetViewerWindow : Window
         var item = SubmeshListBox.SelectedItem as SubmeshItemVM;
         _selectedSubmesh = item?.Index ?? -1;
         if (_selectedSubmesh >= 0) HighlightSubmesh(_selectedSubmesh, true);
+        DrawUvMap(-1, _selectedSubmesh);
     }
 
     private void OnMaterialSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -253,6 +267,7 @@ public partial class AssetViewerWindow : Window
         var item = MaterialListBox.SelectedItem as MaterialSlotItemVM;
         _selectedMaterial = item?.Index ?? -1;
         if (_selectedMaterial >= 0) HighlightByMaterial(_selectedMaterial, true);
+        DrawUvMap(_selectedMaterial);
     }
 
     // ── Detail panel: item visibility event ──────────────────────────────────
@@ -544,7 +559,7 @@ public partial class AssetViewerWindow : Window
         {
             var ib = new ImageBrush(tex) { TileMode = TileMode.Tile, Stretch = Stretch.Fill };
             var emit = new EmissiveMaterial(new ImageBrush(tex) { TileMode = TileMode.Tile, Stretch = Stretch.Fill })
-            { Color = Color.FromRgb(15, 15, 15) };
+            { Color = Color.FromRgb(200, 200, 200) };
             var diff = new DiffuseMaterial(ib);
             group.Children.Add(emit);
             group.Children.Add(diff);
@@ -578,6 +593,9 @@ public partial class AssetViewerWindow : Window
         BoneRoot.Children.Clear();
         _lastBounds = Rect3D.Empty;
         GizmoCanvas.Children.Clear();
+        _matUvLayers.Clear();
+        if (UvMapCanvas  != null) UvMapCanvas.Children.Clear();
+        if (UvMapImage   != null) UvMapImage.Source = null;
     }
 
     private void Rebuild3DScene(G1mData model, IReadOnlyDictionary<int, BitmapSource> textures)
@@ -594,6 +612,11 @@ public partial class AssetViewerWindow : Window
         _suppressSelection = false;
 
         var allMeshes = new Model3DGroup();
+
+        // Build matIdx → uvLayer from MaterialTextures (TexType==1 = BaseColor)
+        _matUvLayers.Clear();
+        foreach (var (matIdx, _, uvLayer, texType) in model.MaterialTextures)
+            if (texType == 1) _matUvLayers.TryAdd(matIdx, uvLayer);
 
         for (int smIdx = 0; smIdx < model.Submeshes.Length; smIdx++)
         {
@@ -622,11 +645,12 @@ public partial class AssetViewerWindow : Window
                 mesh.Normals = norms;
             }
 
-            // Always use channel 0 for rendering
-            if (sm.TexCoords.Length > 0)
+            int uvCh = _matUvLayers.TryGetValue(sm.MaterialIndex, out var ch) ? ch : 0;
+            var uvSrc = uvCh < sm.AllTexCoords.Length ? sm.AllTexCoords[uvCh] : sm.TexCoords;
+            if (uvSrc.Length > 0)
             {
-                var uvs = new PointCollection(sm.TexCoords.Length);
-                foreach (var uv in sm.TexCoords) uvs.Add(new System.Windows.Point(uv.X, uv.Y));
+                var uvs = new PointCollection(uvSrc.Length);
+                foreach (var uv in uvSrc) uvs.Add(new System.Windows.Point(uv.X, uv.Y));
                 mesh.TextureCoordinates = uvs;
             }
 
@@ -676,5 +700,63 @@ public partial class AssetViewerWindow : Window
         }
 
         DrawGizmo();
+    }
+
+    // ── UV Map viewer ─────────────────────────────────────────────────────────
+
+    private void DrawUvMap(int matIdx, int smOnly = -1)
+    {
+        UvMapCanvas.Children.Clear();
+        UvMapImage.Source = null;
+
+        var tab = _vm.SelectedTab;
+        if (tab?.G1mData == null) return;
+        var model = tab.G1mData;
+        const double sz = 202.0;
+
+        // Background texture
+        int bgMat = matIdx >= 0 ? matIdx
+            : smOnly >= 0 && smOnly < model.Submeshes.Length ? model.Submeshes[smOnly].MaterialIndex
+            : -1;
+        if (bgMat >= 0 && tab.ModelTextures.TryGetValue(bgMat, out var bmp))
+            UvMapImage.Source = bmp;
+
+        int ci = 0;
+        for (int si = 0; si < model.Submeshes.Length; si++)
+        {
+            if (smOnly >= 0 && si != smOnly) continue;
+            var sm = model.Submeshes[si];
+            if (matIdx >= 0 && sm.MaterialIndex != matIdx) continue;
+            if (sm.Indices.Length < 3) continue;
+
+            int uvCh = _matUvLayers.TryGetValue(sm.MaterialIndex, out var c) ? c : 0;
+            var uvSrc = uvCh < sm.AllTexCoords.Length ? sm.AllTexCoords[uvCh] : sm.TexCoords;
+            if (uvSrc.Length == 0) continue;
+
+            var col = s_uvPalette[ci++ % s_uvPalette.Length];
+            var brush = new SolidColorBrush(Color.FromArgb(204, col.R, col.G, col.B));
+
+            var geo = new StreamGeometry();
+            using (var ctx = geo.Open())
+            {
+                for (int fi = 0; fi + 2 < sm.Indices.Length; fi += 3)
+                {
+                    int i0 = sm.Indices[fi], i1 = sm.Indices[fi + 1], i2 = sm.Indices[fi + 2];
+                    if ((uint)i0 >= (uint)uvSrc.Length || (uint)i1 >= (uint)uvSrc.Length || (uint)i2 >= (uint)uvSrc.Length) continue;
+                    ctx.BeginFigure(new System.Windows.Point(uvSrc[i0].X * sz, uvSrc[i0].Y * sz), false, true);
+                    ctx.LineTo(new System.Windows.Point(uvSrc[i1].X * sz, uvSrc[i1].Y * sz), true, false);
+                    ctx.LineTo(new System.Windows.Point(uvSrc[i2].X * sz, uvSrc[i2].Y * sz), true, false);
+                }
+            }
+            geo.Freeze();
+
+            UvMapCanvas.Children.Add(new System.Windows.Shapes.Path
+            {
+                Data = geo,
+                Stroke = brush,
+                StrokeThickness = 0.5,
+                Fill = null,
+            });
+        }
     }
 }

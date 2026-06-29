@@ -200,7 +200,7 @@
                             </Expander>
 
                             <!-- Material Slots section -->
-                            <Expander Header="MaterialSlots" IsExpanded="True" Margin="0,4,0,4">
+                            <Expander Header="MaterialSlots" IsExpanded="True" Margin="0,4,0,0">
                                 <ListBox x:Name="MaterialListBox"
                                          ItemsSource="{Binding SelectedTab.MaterialItems}"
                                          SelectionMode="Single"
@@ -216,6 +216,19 @@
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
+                            </Expander>
+
+                            <!-- UV Map section -->
+                            <Expander Header="UV Map" IsExpanded="True" Margin="0,4,0,4">
+                                <Border Margin="4,2,4,2"
+                                        BorderThickness="1"
+                                        BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}">
+                                    <Grid Width="202" Height="202" ClipToBounds="True" Background="#0D0D0D">
+                                        <Image x:Name="UvMapImage" Stretch="Fill" Opacity="0.55"
+                                               RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                                        <Canvas x:Name="UvMapCanvas" Width="202" Height="202" Background="Transparent"/>
+                                    </Grid>
+                                </Border>
                             </Expander>
 
                         </StackPanel>
