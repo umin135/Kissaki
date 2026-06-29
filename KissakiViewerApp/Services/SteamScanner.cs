@@ -9,13 +9,18 @@ public static class SteamScanner
     // Known KatanaEngine games: (AppId, Display Name, exe file name)
     private static readonly (uint AppId, string Name, string ExeName)[] s_knownGames =
     [
-        (838380,  "DEAD OR ALIVE 6",                              "DOA6.exe"),
-        (4144680, "DEAD OR ALIVE 6 Last Round",                   "DOA6LR.exe"),
-        (3920610, "FATAL FRAME II: Crimson Butterfly REMAKE",     "FatalFrame2Remake.exe"),
-        (1121560, "Atelier Ryza: Ever Darkness & the Secret Hideout",  "Atelier_Ryza.exe"),
-        (1257290, "Atelier Ryza 2: Lost Legends & the Secret Fairy",   "Atelier_Ryza2.exe"),
-        (1999770, "Atelier Ryza 3: Alchemist of the End & the Secret Key", "Atelier_Ryza3.exe"),
-        (3681010, "Nioh 3",                                        "nioh3.exe"),
+        (838380,  "DEAD OR ALIVE 6",                                          "DOA6.exe"),
+        (4144680, "DEAD OR ALIVE 6 Last Round",                               "DOA6LR.exe"),
+        (3155730, "Venus Vacation PRISM - DEAD OR ALIVE Xtreme -",            "Venus Vacation PRISM - DEAD OR ALIVE Xtreme -.exe"),
+        (1340990, "Rise of the Ronin",                                         "Ronin.exe"),
+        (3123410, "Atelier Yumia: The Alchemist of Memories & the Envisioned Land",        "Atelier_Yumia.exe"),
+        (3473170, "Atelier Yumia: The Alchemist of Memories & the Envisioned Land - Demo", "Atelier_Yumia.exe"),
+        (1121560, "Atelier Ryza: Ever Darkness & the Secret Hideout",         "Atelier_Ryza.exe"),
+        (1257290, "Atelier Ryza 2: Lost Legends & the Secret Fairy",          "Atelier_Ryza_2.exe"),
+        (1999770, "Atelier Ryza 3: Alchemist of the End & the Secret Key",    "Atelier_Ryza_3.exe"),
+        (3920610, "FATAL FRAME II: Crimson Butterfly REMAKE",                 "FatalFrameII.exe"),
+        (4226020, "FATAL FRAME II: Crimson Butterfly REMAKE DEMO",            "FatalFrameII.exe"),
+        (3681010, "Nioh 3",                                                    "nioh3.exe"),
     ];
 
     public static List<GameProfile> Scan()
@@ -30,7 +35,6 @@ public static class SteamScanner
 
             foreach (var (appId, name, exeName) in s_knownGames)
             {
-                // Try to find the game folder by scanning the acf manifest
                 string acfPath = Path.Combine(libPath, "steamapps", $"appmanifest_{appId}.acf");
                 if (!File.Exists(acfPath)) continue;
 
@@ -40,19 +44,21 @@ public static class SteamScanner
                 string gamePath = Path.Combine(commonPath, installDir);
                 if (!Directory.Exists(gamePath)) continue;
 
-                // Verify fdata_package exists (KatanaEngine marker)
-                if (!Directory.Exists(Path.Combine(gamePath, "fdata_package"))) continue;
+                string? rdbDir = FindRdbDir(gamePath);
+                if (rdbDir == null) continue;
 
-                // Find the exe (try multiple possible names)
-                string? foundExe = FindExe(gamePath, exeName);
-                if (foundExe == null) continue;
+                // For ACF-verified known games, prefer the expected exe name but fall back to
+                // any .exe in the game directory — the game identity is guaranteed by the AppID.
+                string? foundExe = FindExe(gamePath, exeName)
+                                ?? FindAnyExe(gamePath);
 
                 results.Add(new GameProfile
                 {
                     Name          = name,
-                    ExeName       = Path.GetFileName(foundExe),
+                    ExeName       = foundExe != null ? Path.GetFileName(foundExe) : exeName,
                     GameDirectory = gamePath,
                     SteamAppId    = appId,
+                    FdataDir      = rdbDir,
                 });
             }
         }
@@ -63,7 +69,9 @@ public static class SteamScanner
     public static GameProfile? DetectFromDirectory(string dir)
     {
         if (!Directory.Exists(dir)) return null;
-        if (!Directory.Exists(Path.Combine(dir, "fdata_package"))) return null;
+
+        string? rdbDir = FindRdbDir(dir);
+        if (rdbDir == null) return null;
 
         // Try to match by exe name
         foreach (var (appId, name, exeName) in s_knownGames)
@@ -77,22 +85,51 @@ public static class SteamScanner
                     ExeName       = Path.GetFileName(found),
                     GameDirectory = dir,
                     SteamAppId    = appId,
+                    FdataDir      = rdbDir,
                 };
             }
         }
 
-        // Unknown KatanaEngine game — use folder name
-        string fallbackExe = Directory.GetFiles(dir, "*.exe").FirstOrDefault() ?? "";
+        // Unknown KatanaEngine game — use folder name + any exe
+        string fallbackExe = FindAnyExe(dir) ?? "";
         return new GameProfile
         {
             Name          = Path.GetFileName(dir),
             ExeName       = Path.GetFileName(fallbackExe),
             GameDirectory = dir,
             SteamAppId    = 0,
+            FdataDir      = rdbDir,
         };
     }
 
+    /// <summary>
+    /// Scans <paramref name="gameDir"/> and all its immediate subdirectories for
+    /// root.rdb + root.rdx and returns the first directory that contains both.
+    /// Returns null if not found.
+    /// </summary>
+    public static string? FindRdbDir(string gameDir)
+    {
+        if (!Directory.Exists(gameDir)) return null;
+
+        // Check game root itself first
+        if (HasRdb(gameDir)) return gameDir;
+
+        // Scan all immediate subdirectories
+        try
+        {
+            foreach (string sub in Directory.EnumerateDirectories(gameDir))
+                if (HasRdb(sub)) return sub;
+        }
+        catch { }
+
+        return null;
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static bool HasRdb(string dir) =>
+        File.Exists(Path.Combine(dir, "root.rdb")) &&
+        File.Exists(Path.Combine(dir, "root.rdx"));
 
     private static List<string> GetSteamLibraryPaths()
     {
@@ -168,11 +205,16 @@ public static class SteamScanner
         // Try case-insensitive match
         try
         {
-            string? found = Directory.GetFiles(dir, "*.exe")
+            return Directory.GetFiles(dir, "*.exe")
                 .FirstOrDefault(f => string.Equals(Path.GetFileName(f), preferredExe,
                                                    StringComparison.OrdinalIgnoreCase));
-            return found;
         }
+        catch { return null; }
+    }
+
+    private static string? FindAnyExe(string dir)
+    {
+        try { return Directory.GetFiles(dir, "*.exe").FirstOrDefault(); }
         catch { return null; }
     }
 }

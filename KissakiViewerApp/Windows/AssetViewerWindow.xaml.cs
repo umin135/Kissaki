@@ -24,7 +24,11 @@ public partial class AssetViewerWindow : Window
     private BitmapSource? _skyboxTex;
 
     // ── Shell outline (3D duplicate, expanded+flipped, back-face only) ────────
+    // Outlines are built lazily the first time a submesh is selected for highlight.
+    // Eager pre-building all 100+ outlines on model load caused multi-second UI freezes.
     private readonly List<GeometryModel3D?> _outlineMeshes = [];
+    private Model3DGroup? _allMeshes;   // scene root content; held so lazy outlines can be added
+    private double        _shellScale;  // stored at load time for use during lazy build
 
     // ── 3D scene tracking ─────────────────────────────────────────────────────
     // Per-submesh: (geometry, front material, back material, material index, LOD group)
@@ -57,7 +61,7 @@ public partial class AssetViewerWindow : Window
 
     public AssetViewerWindow(
         FdataExtractor extractor,
-        IReadOnlyDictionary<ushort, List<AssetItemViewModel>> allG1tByFid,
+        IReadOnlyDictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> allG1tByFid,
         IReadOnlyDictionary<uint,   AssetItemViewModel>       allAssetsByKtid,
         Func<IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>>> getG1mMap)
     {
@@ -361,16 +365,32 @@ public partial class AssetViewerWindow : Window
 
     private void SetShellOutlineVisible(IEnumerable<int>? indices)
     {
-        // Hide all outlines first (Material=null + BackMaterial=null = invisible)
+        // Hide all currently-built outlines (null slots are already invisible).
         foreach (var g in _outlineMeshes)
             if (g != null) { g.Material = null; g.BackMaterial = null; }
 
         if (indices == null) return;
-        // Show: Material on the winding-flipped mesh = the inward-facing surfaces,
-        // which are behind the original mesh and only protrude at the silhouette.
+
         foreach (var idx in indices)
-            if ((uint)idx < (uint)_outlineMeshes.Count && _outlineMeshes[idx] != null)
-                _outlineMeshes[idx]!.Material = s_outlineMat;
+        {
+            if ((uint)idx >= (uint)_outlineMeshes.Count) continue;
+
+            // Build on first selection — avoids the O(n_submeshes × n_vertices) work at load time.
+            if (_outlineMeshes[idx] == null && _allMeshes != null)
+            {
+                var srcMesh = _submeshGeos[idx].Geo?.Geometry as MeshGeometry3D;
+                if (srcMesh is { Positions.Count: > 0 })
+                {
+                    var outlineMesh = BuildShellOutlineMesh(srcMesh, _shellScale);
+                    var outlineGeo  = new GeometryModel3D(outlineMesh, null) { BackMaterial = null };
+                    _outlineMeshes[idx] = outlineGeo;
+                    _allMeshes.Children.Add(outlineGeo);
+                }
+            }
+
+            if (_outlineMeshes[idx] is { } built)
+                built.Material = s_outlineMat;
+        }
     }
 
     // Returns a slightly expanded, winding-flipped duplicate of src for the shell outline.
@@ -725,6 +745,7 @@ public partial class AssetViewerWindow : Window
         _suppressSelection = false;
 
         SceneRoot.Content = null;
+        _allMeshes = null;
         BoneRoot.Children.Clear();
         _lastBounds = Rect3D.Empty;
         GizmoCanvas.Children.Clear();
@@ -830,25 +851,18 @@ public partial class AssetViewerWindow : Window
         foreach (var g in pendingOpaque) allMeshes.Children.Add(g);
         foreach (var g in pendingAlpha)  allMeshes.Children.Add(g);
 
-        // Build shell outline meshes: scale = 1% of model's max dimension
-        var tmpBounds   = allMeshes.Bounds;
-        double maxDim0  = tmpBounds.IsEmpty ? 1.0
+        // Compute shell scale from the main-mesh bounds.
+        // Outline meshes are built lazily in SetShellOutlineVisible on first submesh selection —
+        // pre-building all outlines up-front caused 10-30 s UI freezes on models with 100+ submeshes.
+        var tmpBounds  = allMeshes.Bounds;
+        double maxDim0 = tmpBounds.IsEmpty ? 1.0
             : Math.Max(Math.Max(tmpBounds.SizeX, tmpBounds.SizeY), tmpBounds.SizeZ);
-        double shellScale = maxDim0 * 0.005;
+        _shellScale = maxDim0 * 0.0025;
+        _allMeshes  = allMeshes;
 
         _outlineMeshes.Clear();
-        foreach (var (mainGeo, _, _, _, _) in _submeshGeos)
-        {
-            if (mainGeo?.Geometry is not MeshGeometry3D srcMesh || srcMesh.Positions.Count == 0)
-            {
-                _outlineMeshes.Add(null);
-                continue;
-            }
-            var outlineMesh = BuildShellOutlineMesh(srcMesh, shellScale);
-            var outlineGeo  = new GeometryModel3D(outlineMesh, null) { BackMaterial = null };
-            _outlineMeshes.Add(outlineGeo);
-            allMeshes.Children.Add(outlineGeo);
-        }
+        for (int i = 0; i < _submeshGeos.Count; i++)
+            _outlineMeshes.Add(null);   // populated on demand
 
         SceneRoot.Content = allMeshes.Children.Count > 0 ? allMeshes : null;
 
@@ -867,7 +881,7 @@ public partial class AssetViewerWindow : Window
         // Bone overlay
         RebuildBoneOverlay(model, tab?.ShowBones ?? false);
 
-        var bounds = allMeshes.Bounds;
+        var bounds = tmpBounds;   // outlines no longer in allMeshes, so Bounds is identical to tmpBounds
         _lastBounds = bounds;
 
         if (!bounds.IsEmpty)

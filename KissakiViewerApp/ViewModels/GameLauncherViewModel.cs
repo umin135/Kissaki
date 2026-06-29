@@ -62,15 +62,15 @@ public sealed partial class GameLauncherViewModel : ObservableObject
     {
         var dlg = new VistaFolderBrowserDialog
         {
-            Description            = "KatanaEngine 게임 폴더를 선택하세요 (fdata_package 포함)",
+            Description            = "KatanaEngine 게임 폴더를 선택하세요 (root.rdb 포함 폴더)",
             UseDescriptionForTitle = true,
         };
         if (dlg.ShowDialog() != true) return;
 
         string dir = dlg.SelectedPath;
-        if (!Directory.Exists(Path.Combine(dir, "fdata_package")))
+        if (SteamScanner.FindRdbDir(dir) == null)
         {
-            StatusText = "fdata_package 폴더가 없습니다. KatanaEngine 게임 경로를 선택하세요.";
+            StatusText = "root.rdb를 찾을 수 없습니다. KatanaEngine 게임 경로를 선택하세요.";
             return;
         }
 

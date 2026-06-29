@@ -100,8 +100,14 @@ public sealed partial class AssetTabItem : ObservableObject
 
     // ── 3D detail panel ────────────────────────────────────────────────────────
     [ObservableProperty] private bool _showBones;
-    public ObservableCollection<SubmeshItemVM>    SubmeshItems  { get; } = [];
-    public ObservableCollection<MaterialSlotItemVM> MaterialItems { get; } = [];
+
+    // Replaced as a whole on each model load to avoid 100+ individual CollectionChanged
+    // events that cause expensive WPF layout passes for each item insertion.
+    [ObservableProperty]
+    private ObservableCollection<SubmeshItemVM> _submeshItems = [];
+
+    [ObservableProperty]
+    private ObservableCollection<MaterialSlotItemVM> _materialItems = [];
 
     // ── LOD selection ──────────────────────────────────────────────────────────
     // 0 = no group info or single group; 2+ = real LOD levels present
@@ -144,14 +150,14 @@ public sealed partial class AssetViewerViewModel : ObservableObject
     public bool HasTabs => Tabs.Count > 0;
 
     private readonly FdataExtractor _extractor;
-    private readonly IReadOnlyDictionary<ushort, List<AssetItemViewModel>> _allG1tByFid;
+    private readonly IReadOnlyDictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> _allG1tByFid;
     private readonly IReadOnlyDictionary<uint,  AssetItemViewModel>        _allAssetsByKtid;
     // Func so that late-built kidsobjdb map (populated after asset load) is always current
     private readonly Func<IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>>> _getG1mMap;
 
     public AssetViewerViewModel(
         FdataExtractor extractor,
-        IReadOnlyDictionary<ushort, List<AssetItemViewModel>> allG1tByFid,
+        IReadOnlyDictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> allG1tByFid,
         IReadOnlyDictionary<uint,   AssetItemViewModel>       allAssetsByKtid,
         Func<IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>>> getG1mMap)
     {
@@ -364,7 +370,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             List<AssetItemViewModel> g1tFileList;
             if (kidsG1ts is { Count: > 0 }) { g1tFileList = kidsG1ts; g1tSrc = "kidsobjdb"; }
             else if (colocated.Count > 0)   { g1tFileList = colocated; g1tSrc = "colocated"; }
-            else                            { g1tFileList = ResolveG1tByProximity(rec.FdataId); g1tSrc = "proximity"; }
+            else                            { g1tFileList = ResolveG1tByProximity(rec.FdataId, vm.RdbName); g1tSrc = "proximity"; }
 
             AppLogger.Info($"[3D] G1T src={g1tSrc} count={g1tFileList.Count} model=0x{rec.FileKtid:X8}");
 
@@ -463,18 +469,21 @@ public sealed partial class AssetViewerViewModel : ObservableObject
 
         if (ct.IsCancellationRequested || model == null) return;
 
-        Application.Current.Dispatcher.Invoke(() =>
+        // Build detail-panel collections on the background thread before touching the UI thread.
+        // Assigning whole new collections fires one PropertyChanged instead of N CollectionChanged
+        // events, avoiding expensive WPF layout passes for each individual item insertion.
+        var newSubmeshItems = new ObservableCollection<SubmeshItemVM>(
+            Enumerable.Range(0, model.Submeshes.Length)
+                .Select(i => new SubmeshItemVM(i, model.Submeshes[i].MaterialIndex, model.Submeshes[i].LodGroup)));
+        var newMaterialItems = new ObservableCollection<MaterialSlotItemVM>(
+            model.Submeshes.Select(s => s.MaterialIndex).Distinct().OrderBy(x => x)
+                .Select(mi => new MaterialSlotItemVM(mi)));
+
+        await Application.Current.Dispatcher.InvokeAsync(() =>
         {
             tab.SetModelTextures(textures);
-
-            // Populate detail-panel lists before setting G1mData so the window
-            // can subscribe to item events in its OnTabPropertyChanged handler.
-            tab.SubmeshItems.Clear();
-            tab.MaterialItems.Clear();
-            for (int i = 0; i < model.Submeshes.Length; i++)
-                tab.SubmeshItems.Add(new SubmeshItemVM(i, model.Submeshes[i].MaterialIndex, model.Submeshes[i].LodGroup));
-            foreach (var mi in model.Submeshes.Select(s => s.MaterialIndex).Distinct().OrderBy(x => x))
-                tab.MaterialItems.Add(new MaterialSlotItemVM(mi));
+            tab.SubmeshItems  = newSubmeshItems;
+            tab.MaterialItems = newMaterialItems;
 
             tab.LodGroupCount    = model.LodGroupCount;
             tab.SelectedLodGroup = 0;
@@ -488,19 +497,19 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         });
     }
 
-    private List<AssetItemViewModel> ResolveG1tByProximity(ushort g1mFid)
+    private List<AssetItemViewModel> ResolveG1tByProximity(ushort g1mFid, string g1mRdbName)
     {
         if (_allG1tByFid.Count == 0) return [];
-        ushort nearestFid = 0;
-        int nearestDelta  = int.MaxValue;
-        foreach (var fid in _allG1tByFid.Keys)
+        var nearestKey  = ((string Rdb, ushort Fid))default;
+        int nearestDelta = int.MaxValue;
+        foreach (var key in _allG1tByFid.Keys)
         {
-            int d = Math.Abs((int)fid - (int)g1mFid);
-            if (d < nearestDelta) { nearestDelta = d; nearestFid = fid; }
+            if (key.Rdb != g1mRdbName) continue;
+            int d = Math.Abs((int)key.Fid - (int)g1mFid);
+            if (d < nearestDelta) { nearestDelta = d; nearestKey = key; }
         }
-        return nearestDelta < int.MaxValue && _allG1tByFid.TryGetValue(nearestFid, out var list)
-            ? list
-            : [];
+        return nearestDelta < int.MaxValue && _allG1tByFid.TryGetValue(nearestKey, out var list)
+            ? list : [];
     }
 
     private static void SetStatus(AssetTabItem tab, string msg)

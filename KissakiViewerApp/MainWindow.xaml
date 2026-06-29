@@ -199,9 +199,17 @@
                                 <GridViewColumn Header="Name" Width="300">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
-                                            <TextBlock Text="{Binding DisplayFileName}"
+                                            <TextBlock Text="{Binding DisplayName}"
                                                        FontFamily="Consolas" FontSize="12"
                                                        TextTrimming="CharacterEllipsis"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Hash" Width="110">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding KtidHex}"
+                                                       FontFamily="Consolas" FontSize="11" Opacity="0.5"/>
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
@@ -212,19 +220,20 @@
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
+                                <GridViewColumn Header="Container" Width="170">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Container}"
+                                                       FontFamily="Consolas" FontSize="11" Opacity="0.45"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
                                 <GridViewColumn Header="Size" Width="80">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding SizeStr}" FontSize="11" Opacity="0.55"
                                                        HorizontalAlignment="Right"/>
-                                        </DataTemplate>
-                                    </GridViewColumn.CellTemplate>
-                                </GridViewColumn>
-                                <GridViewColumn Header="Hash" Width="110">
-                                    <GridViewColumn.CellTemplate>
-                                        <DataTemplate>
-                                            <TextBlock Text="{Binding KtidHex}"
-                                                       FontFamily="Consolas" FontSize="11" Opacity="0.5"/>
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
@@ -288,7 +297,7 @@
                                                            HorizontalAlignment="Center"
                                                            VerticalAlignment="Center"/>
                                             </Border>
-                                            <TextBlock Text="{Binding DisplayFileName}"
+                                            <TextBlock Text="{Binding DisplayName}"
                                                        FontSize="10" TextWrapping="Wrap"
                                                        TextAlignment="Center"
                                                        MaxWidth="86" MaxHeight="32"

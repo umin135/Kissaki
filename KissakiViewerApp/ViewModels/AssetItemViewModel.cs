@@ -12,6 +12,8 @@ public sealed partial class AssetItemViewModel : ObservableObject
     public string      Storage  => Record.Storage.ToString();
     public string      SizeStr  => FormatSize(Record.FileSize);
     public string      Container { get; }
+    /// <summary>Source RDB filename (e.g. "root.rdb", "system.rdb"). Used as top-level folder in the tree.</summary>
+    public string      RdbName  { get; }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(DisplayName))]
@@ -43,10 +45,11 @@ public sealed partial class AssetItemViewModel : ObservableObject
     [ObservableProperty]
     private bool _isSelected;
 
-    public AssetItemViewModel(AssetRecord record, string container)
+    public AssetItemViewModel(AssetRecord record, string container, string rdbName = "root.rdb")
     {
         Record    = record;
         Container = container;
+        RdbName   = rdbName;
     }
 
     private static string GetBaseName(string path)

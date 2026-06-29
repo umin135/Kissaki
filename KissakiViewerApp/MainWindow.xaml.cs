@@ -20,15 +20,9 @@ public partial class MainWindow : Window
         DataContext = _vm;
     }
 
-    private void Window_Loaded(object sender, RoutedEventArgs e)
+    private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        // Populate with log lines already accumulated during the launch load phase
-        foreach (var line in _vm.ConsoleLog)
-            ConsoleTextBox.AppendText(line + "\n");
-        if (_vm.ConsoleLog.Count > 0)
-            ConsoleTextBox.ScrollToEnd();
-
-        // Auto-scroll and append when new lines arrive (e.g. from BuildG1mMapAsync)
+        // Wire console auto-scroll before any loading starts.
         _vm.ConsoleLog.CollectionChanged += (_, args) =>
         {
             if (args.NewItems is not { Count: > 0 }) return;
@@ -36,6 +30,13 @@ public partial class MainWindow : Window
                 ConsoleTextBox.AppendText((string)item + "\n");
             ConsoleTextBox.ScrollToEnd();
         };
+
+        // Phase 1 — fast: parse RDB and populate the asset list.
+        await _vm.LoadAsync();
+
+        // Phase 2 — slow: name recovery, folder tree, G1M→G1T map.
+        // The browser window is already visible and responsive at this point.
+        await _vm.LoadBackgroundAsync();
     }
 
     private void ConsoleToggle_Click(object sender, RoutedEventArgs e)

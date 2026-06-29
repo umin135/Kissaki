@@ -69,7 +69,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     internal FdataExtractor? Extractor => _extractor;
 
-    internal IReadOnlyDictionary<ushort, List<AssetItemViewModel>> AllG1tByFid =>
+    internal IReadOnlyDictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> AllG1tByFid =>
         _allG1tByFid;
 
     internal IReadOnlyDictionary<uint, AssetItemViewModel> AllAssetsByKtid =>
@@ -82,13 +82,16 @@ public sealed partial class MainViewModel : ObservableObject
 
     private readonly GameProfile _profile;
     private RdbReader?    _rdb;
+    private string        _primaryRdbPath = string.Empty;
     private FdataExtractor? _extractor;
     private Dictionary<uint, string> _nameMap = [];
 
-    private Dictionary<ushort, List<AssetItemViewModel>> _allG1tByFid = [];
+    private Dictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> _allG1tByFid = [];
     private Dictionary<uint, AssetItemViewModel>         _allAssetsByKtid = [];
     private IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>> _g1mToG1tMap =
         new Dictionary<uint, IReadOnlyList<AssetItemViewModel>>();
+
+    private CancellationTokenSource? _filterCts;
 
     // ── Construction ─────────────────────────────────────────────────────────
 
@@ -105,96 +108,151 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ── Property change reactions ─────────────────────────────────────────────
 
-    partial void OnFilterTextChanged(string value)              => ApplyFilter();
-    partial void OnSelectedTypeFilterChanged(string value)      => ApplyFilter();
-    partial void OnSelectedFolderNodeChanged(FolderNode? value) => ApplyFilter();
+    partial void OnFilterTextChanged(string value)              => ScheduleFilter();
+    partial void OnSelectedTypeFilterChanged(string value)      => ScheduleFilter();
+    partial void OnSelectedFolderNodeChanged(FolderNode? value) => ScheduleFilter();
     partial void OnRestoreAssetNameChanged(bool value)
     {
         SelectedFolderNode = null;
-        BuildFolderTree();
+        _ = BuildFolderTreeAsync();
     }
 
     // ── Load ──────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Fast phase: parse RDB and build the asset list. Completes in seconds even for large games.
+    /// The launcher awaits this before closing. Slow work (names, folder tree, G1M map) runs
+    /// in <see cref="LoadBackgroundAsync"/> after the browser window is visible.
+    /// </summary>
     public async Task LoadAsync()
     {
-        string rdbPath = Path.Combine(_profile.FdataDir, "root.rdb");
-        string rdxPath = Path.Combine(_profile.FdataDir, "root.rdx");
+        string fdataDir = _profile.FdataDir;
+        var rdbFiles = Directory.Exists(fdataDir)
+            ? Directory.GetFiles(fdataDir, "*.rdb")
+                .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
+                .ToArray()
+            : [];
 
-        if (!File.Exists(rdbPath))
+        if (rdbFiles.Length == 0)
         {
-            StatusText = $"파일 없음: {rdbPath}";
+            StatusText = $"RDB 파일 없음: {fdataDir}";
             return;
         }
 
         IsLoading    = true;
         LoadProgress = 0;
-        StatusText   = "root.rdb 파싱 중...";
+        StatusText   = rdbFiles.Length == 1
+            ? $"{Path.GetFileName(rdbFiles[0])} 파싱 중..."
+            : $"RDB 파싱 중... ({rdbFiles.Length}개 파일)";
 
-        List<AssetItemViewModel>? batch = null;
+        List<AssetItemViewModel>?                                          batch    = null;
+        Dictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>>?   g1tByFid = null;
+        Dictionary<uint, AssetItemViewModel>?                              byKtid   = null;
         string? err = null;
 
         try
         {
-            batch = await Task.Run(() =>
+            var r = await Task.Run(() =>
             {
-                var rdb    = new RdbReader(rdbPath, rdxPath);
-                _extractor = new FdataExtractor(_profile.FdataDir);
+                _extractor = new FdataExtractor(fdataDir);
+                var list   = new List<AssetItemViewModel>();
 
-                if (!rdb.Load())
-                    throw new InvalidDataException("RDB 로드 실패");
-
-                _rdb = rdb;
-                var list = new List<AssetItemViewModel>(rdb.Entries.Count);
-                foreach (var rec in rdb.Entries)
+                foreach (var rdbFile in rdbFiles)
                 {
-                    string container = rdb.ResolveFdata(rec.FdataId);
-                    list.Add(new AssetItemViewModel(rec, container));
+                    string rdxFile = Path.ChangeExtension(rdbFile, ".rdx");
+                    string rdbName = Path.GetFileName(rdbFile);
+                    var    reader  = new RdbReader(rdbFile, rdxFile);
+
+                    if (!reader.Load())
+                    {
+                        AppLogger.Warn($"[RDB] 로드 실패: {rdbName}");
+                        continue;
+                    }
+
+                    if (_rdb == null)
+                    {
+                        _rdb = reader;
+                        _primaryRdbPath = rdbFile;
+                    }
+
+                    foreach (var rec in reader.Entries)
+                    {
+                        string container = reader.ResolveFdata(rec.FdataId);
+                        list.Add(new AssetItemViewModel(rec, container, rdbName));
+                    }
+
+                    AppLogger.Info($"[RDB] {rdbName}: {reader.Entries.Count:N0}개");
                 }
-                return list;
+
+                if (_rdb == null)
+                    throw new InvalidDataException("로드된 RDB 없음");
+
+                // G1T index keyed by (rdbName, fdataId) so proximity search stays within one RDB.
+                var fid = list
+                    .Where(a => a.TypeExt == ".g1t")
+                    .GroupBy(a => (a.RdbName, a.Record.FdataId))
+                    .ToDictionary(g => g.Key, g => g.OrderBy(a => a.Record.FdataOffset).ToList());
+
+                var ktid = new Dictionary<uint, AssetItemViewModel>(list.Count);
+                foreach (var a in list) ktid.TryAdd(a.Record.FileKtid, a);
+
+                return (List: list, G1tByFid: fid, ByKtid: ktid);
             });
+            batch    = r.List;
+            g1tByFid = r.G1tByFid;
+            byKtid   = r.ByKtid;
         }
         catch (Exception ex) { err = ex.Message; }
 
         if (err != null) { StatusText = $"오류: {err}"; IsLoading = false; return; }
 
-        Assets = new ObservableCollection<AssetItemViewModel>(batch!);
-
-        // Build lookup tables for G1T resolution
-        _allG1tByFid = Assets
-            .Where(a => a.TypeExt == ".g1t")
-            .GroupBy(a => a.Record.FdataId)
-            .ToDictionary(g => g.Key, g => g.OrderBy(a => a.Record.FdataOffset).ToList());
-
-        _allAssetsByKtid = new Dictionary<uint, AssetItemViewModel>();
-        foreach (var a in Assets) _allAssetsByKtid.TryAdd(a.Record.FileKtid, a);
+        Assets           = new ObservableCollection<AssetItemViewModel>(batch!);
+        _allG1tByFid     = g1tByFid!;
+        _allAssetsByKtid = byKtid!;
 
         BuildTypeFilters();
         AppLogger.Info($"에셋 로드 완료: {Assets.Count:N0}개");
-        StatusText = $"에셋 로드됨 ({Assets.Count:N0}개) — 이름 사전 로드 중...";
+
+        FilteredAssets = new ObservableCollection<AssetItemViewModel>(batch!);
+        StatusText     = $"{batch!.Count:N0}개 에셋";
+
+        IsLoading    = false;
+        LoadProgress = 100;
+    }
+
+    /// <summary>
+    /// Slow background work called from <c>MainWindow.Window_Loaded</c> after the browser is visible.
+    /// Runs name recovery, folder tree build, and G1M→G1T map construction without blocking the UI.
+    /// </summary>
+    public async Task LoadBackgroundAsync()
+    {
+        if (_extractor == null) return;
+
+        IsLoading    = true;
+        LoadProgress = 0;
+        StatusText   = "이름 사전 로드 중...";
 
         await RunNameRecoveryAsync();
+        LoadProgress = 30;
 
-        BuildFolderTree();
-        ApplyFilter();
+        await BuildFolderTreeAsync();
+        LoadProgress = 60;
+
+        await BuildG1mMapAsync();
 
         StatusText   = $"준비 완료: {Assets.Count:N0}개 에셋, {_nameMap.Count:N0}개 파일명 복구";
         IsLoading    = false;
         LoadProgress = 100;
-
-        // Build G1M→G1T map in background (non-blocking)
-        _ = BuildG1mMapAsync();
     }
 
     private async Task BuildG1mMapAsync()
     {
         if (_extractor == null) return;
 
-        string rdbPath = Path.Combine(_profile.FdataDir, "root.rdb");
+        string rdbPath = _primaryRdbPath;
         string gameDir = _profile.GameDirectory;
 
-        // Move Assets.ToList() + TryLoad (JSON parse + 78k dict build) off the UI thread.
-        // Without this, the cache-hit path has no await and blocks the UI until it returns.
+        // Move Assets.ToList() + TryLoad (JSON parse + dict build) off the UI thread.
         var (allAssets, cached, hasCached) = await Task.Run(() =>
         {
             var assets = Assets.ToList();
@@ -227,8 +285,7 @@ public sealed partial class MainViewModel : ObservableObject
         IsLoading    = true;
         LoadProgress = 0;
         await RunNameRecoveryAsync();
-        BuildFolderTree();
-        ApplyFilter();
+        await BuildFolderTreeAsync();
         IsLoading    = false;
         LoadProgress = 100;
     }
@@ -255,11 +312,18 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         _nameMap = names;
-        foreach (var a in Assets)
-            if (_nameMap.TryGetValue(a.Record.FileKtid, out string? n))
-                a.RecoveredName = n;
 
-        int matched = Assets.Count(a => a.RecoveredName != null);
+        // Apply names off the UI thread. PropertyChanged from a background thread is safe in WPF —
+        // the binding engine marshals updates to the dispatcher automatically.
+        var snapshot = Assets.ToList();
+        await Task.Run(() =>
+        {
+            foreach (var a in snapshot)
+                if (_nameMap.TryGetValue(a.Record.FileKtid, out string? n))
+                    a.RecoveredName = n;
+        });
+
+        int matched = snapshot.Count(a => a.RecoveredName != null);
         AppLogger.Info($"[NameDictionary] {names.Count}개 로드, {matched}개 적용");
     }
 
@@ -386,9 +450,10 @@ public sealed partial class MainViewModel : ObservableObject
 
     private List<AssetItemViewModel> ResolveG1tFilesForModel(AssetItemViewModel vm)
     {
-        uint   ktid = vm.Record.FileKtid;
-        string cont = vm.Container;
-        ushort fid  = vm.Record.FdataId;
+        uint   ktid    = vm.Record.FileKtid;
+        string cont    = vm.Container;
+        ushort fid     = vm.Record.FdataId;
+        string rdbName = vm.RdbName;
 
         // Priority 1: kidsobjdb map
         if (_g1mToG1tMap.TryGetValue(ktid, out var mapped) && mapped.Count > 0)
@@ -401,16 +466,18 @@ public sealed partial class MainViewModel : ObservableObject
             .ToList();
         if (colocated.Count > 0) return colocated;
 
-        // Priority 3: nearest fdata ID
+        // Priority 3: nearest fdata ID within the same RDB (cross-RDB proximity is meaningless).
         if (_allG1tByFid.Count == 0) return [];
-        ushort nearestFid  = 0;
-        int    nearestDelta = int.MaxValue;
-        foreach (var f in _allG1tByFid.Keys)
+        var nearestKey  = ((string Rdb, ushort Fid))default;
+        int nearestDelta = int.MaxValue;
+        foreach (var key in _allG1tByFid.Keys)
         {
-            int d = Math.Abs((int)f - (int)fid);
-            if (d < nearestDelta) { nearestDelta = d; nearestFid = f; }
+            if (key.Rdb != rdbName) continue;
+            int d = Math.Abs((int)key.Fid - (int)fid);
+            if (d < nearestDelta) { nearestDelta = d; nearestKey = key; }
         }
-        return _allG1tByFid.TryGetValue(nearestFid, out var list) ? list : [];
+        return nearestDelta < int.MaxValue && _allG1tByFid.TryGetValue(nearestKey, out var list)
+            ? list : [];
     }
 
     // ── Export ────────────────────────────────────────────────────────────────
@@ -477,62 +544,70 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ── Folder tree ───────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Returns the folder path used for tree building and filtering.
-    /// RestoreAssetName=true  → "Content/path" or "Content (Unrecovered)/category"
-    /// RestoreAssetName=false → flat category only
-    /// </summary>
-    private string GetEffectiveFolderPath(AssetItemViewModel asset)
+    // Instance overload: reads _restoreAssetName from UI thread. Do NOT call from Task.Run.
+    private string GetEffectiveFolderPath(AssetItemViewModel asset) =>
+        GetEffectiveFolderPath(asset, _restoreAssetName);
+
+    // Static overload: safe to call from any thread with an explicitly captured value.
+    private static string GetEffectiveFolderPath(AssetItemViewModel asset, bool restoreNames)
     {
-        if (!_restoreAssetName)
-            return KtidExtension.GetCategory(asset.Record.TypeKtid);
+        // Each RDB file is a top-level folder in the tree (e.g. "root.rdb", "system.rdb").
+        string prefix = asset.RdbName + "/";
+
+        if (!restoreNames)
+            return prefix + KtidExtension.GetCategory(asset.Record.TypeKtid);
 
         if (asset.RecoveredName is { } rn)
         {
             string normalized = rn.Replace('\\', '/');
             int sep = normalized.LastIndexOf('/');
             string sub = sep > 0 ? normalized[..sep] : string.Empty;
-            return string.IsNullOrEmpty(sub) ? "Content" : "Content/" + sub;
+            return string.IsNullOrEmpty(sub) ? prefix + "Content" : prefix + "Content/" + sub;
         }
 
-        return "Content (Unrecovered)/" + KtidExtension.GetCategory(asset.Record.TypeKtid);
+        return prefix + "Content (Unrecovered)/" + KtidExtension.GetCategory(asset.Record.TypeKtid);
     }
 
-    private void BuildFolderTree()
+    private async Task BuildFolderTreeAsync()
     {
-        var nodeMap = new Dictionary<string, FolderNode>(StringComparer.OrdinalIgnoreCase);
-        var roots   = new List<FolderNode>();
+        var assets       = Assets.ToList();
+        bool restoreNames = RestoreAssetName;
 
-        foreach (var asset in Assets)
+        var r = await Task.Run(() =>
         {
-            string folderPath = GetEffectiveFolderPath(asset);
-            if (string.IsNullOrEmpty(folderPath)) continue;
+            var nodeMap  = new Dictionary<string, FolderNode>(StringComparer.OrdinalIgnoreCase);
+            var rootList = new List<FolderNode>();
 
-            EnsurePath(folderPath, nodeMap, roots);
-        }
+            foreach (var asset in assets)
+            {
+                string folderPath = GetEffectiveFolderPath(asset, restoreNames);
+                if (string.IsNullOrEmpty(folderPath)) continue;
+                EnsurePath(folderPath, nodeMap, rootList);
+            }
 
-        int unknownCount = Assets.Count(a => string.IsNullOrEmpty(GetEffectiveFolderPath(a)));
-        if (unknownCount > 0)
-        {
-            var unknown = new FolderNode("Unknown", string.Empty, isUnknown: true) { AssetCount = unknownCount };
-            roots.Add(unknown);
-        }
+            int unkCount = assets.Count(a => string.IsNullOrEmpty(GetEffectiveFolderPath(a, restoreNames)));
 
-        // Sort roots: alphabetical, Misc last, Unknown last
-        roots.Sort((a, b) =>
-        {
-            if (a.IsUnknown != b.IsUnknown) return a.IsUnknown ? 1 : -1;
-            bool aM = a.Name.Equals("Misc", StringComparison.OrdinalIgnoreCase);
-            bool bM = b.Name.Equals("Misc", StringComparison.OrdinalIgnoreCase);
-            if (aM != bM) return aM ? 1 : -1;
-            return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            rootList.Sort((a, b) =>
+            {
+                if (a.IsUnknown != b.IsUnknown) return a.IsUnknown ? 1 : -1;
+                bool aM = a.Name.Equals("Misc", StringComparison.OrdinalIgnoreCase);
+                bool bM = b.Name.Equals("Misc", StringComparison.OrdinalIgnoreCase);
+                if (aM != bM) return aM ? 1 : -1;
+                return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            });
+            foreach (var root in rootList) SortChildrenRecursive(root);
+
+            return (Roots: rootList, UnknownCount: unkCount);
         });
-        foreach (var root in roots) SortChildrenRecursive(root);
 
-        FolderTree = new ObservableCollection<FolderNode>(roots);
+        if (r.UnknownCount > 0)
+        {
+            var unknown = new FolderNode("Unknown", string.Empty, isUnknown: true) { AssetCount = r.UnknownCount };
+            r.Roots.Add(unknown);
+        }
 
-        // Default selection: first node
-        SelectedFolderNode ??= roots.FirstOrDefault();
+        FolderTree         = new ObservableCollection<FolderNode>(r.Roots);
+        SelectedFolderNode ??= r.Roots.FirstOrDefault();
     }
 
     private static FolderNode EnsurePath(string path,
@@ -570,33 +645,57 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ── Filter ────────────────────────────────────────────────────────────────
 
-    private void ApplyFilter()
+    private void ScheduleFilter()
     {
-        string text = FilterText.Trim().ToLowerInvariant();
-        string type = SelectedTypeFilter;
+        _filterCts?.Cancel();
+        _filterCts = new CancellationTokenSource();
+        _ = ApplyFilterAsync(_filterCts.Token);
+    }
 
-        IEnumerable<AssetItemViewModel> source = SelectedFolderNode switch
+    private async Task ApplyFilterAsync(CancellationToken ct = default)
+    {
+        string text        = FilterText.Trim().ToLowerInvariant();
+        string type        = SelectedTypeFilter;
+        var    folder      = SelectedFolderNode;
+        var    assets      = Assets;          // stable reference — not modified after LoadAsync
+        bool   restoreNames = RestoreAssetName;
+
+        List<AssetItemViewModel> filtered;
+        try
         {
-            null                   => Assets,
-            { IsUnknown: true }    => Assets.Where(a => string.IsNullOrEmpty(GetEffectiveFolderPath(a))),
-            FolderNode fn          => Assets.Where(a =>
-                GetEffectiveFolderPath(a).StartsWith(fn.FullPath, StringComparison.OrdinalIgnoreCase)),
-        };
-
-        FilteredAssets = new ObservableCollection<AssetItemViewModel>(
-            source.Where(a =>
+            filtered = await Task.Run(() =>
             {
-                bool typeOk = type == "All" || a.TypeExt == type;
-                bool textOk = string.IsNullOrEmpty(text) ||
-                              a.KtidHex.Contains(text, StringComparison.OrdinalIgnoreCase) ||
-                              a.TypeExt.Contains(text, StringComparison.OrdinalIgnoreCase) ||
-                              (a.RecoveredName != null && a.RecoveredName.Contains(text, StringComparison.OrdinalIgnoreCase));
-                return typeOk && textOk;
-            }));
+                IEnumerable<AssetItemViewModel> source = folder switch
+                {
+                    null               => (IEnumerable<AssetItemViewModel>)assets,
+                    { IsUnknown: true } => assets.Where(a =>
+                        string.IsNullOrEmpty(GetEffectiveFolderPath(a, restoreNames))),
+                    FolderNode fn      => assets.Where(a =>
+                        GetEffectiveFolderPath(a, restoreNames)
+                            .StartsWith(fn.FullPath, StringComparison.OrdinalIgnoreCase)),
+                };
 
-        StatusText = FilteredAssets.Count == Assets.Count
-            ? $"{Assets.Count:N0}개 에셋"
-            : $"{FilteredAssets.Count:N0} / {Assets.Count:N0}개 에셋 (필터)";
+                return source.Where(a =>
+                {
+                    bool typeOk = type == "All" || a.TypeExt == type;
+                    bool textOk = string.IsNullOrEmpty(text) ||
+                                  a.KtidHex.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+                                  a.TypeExt.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+                                  (a.RecoveredName != null &&
+                                   a.RecoveredName.Contains(text, StringComparison.OrdinalIgnoreCase));
+                    return typeOk && textOk;
+                }).ToList();
+            }, ct);
+        }
+        catch (OperationCanceledException) { return; }
+
+        if (ct.IsCancellationRequested) return;
+
+        FilteredAssets = new ObservableCollection<AssetItemViewModel>(filtered);
+        int total = Assets.Count;
+        StatusText = filtered.Count == total
+            ? $"{total:N0}개 에셋"
+            : $"{filtered.Count:N0} / {total:N0}개 에셋 (필터)";
     }
 
     private void BuildTypeFilters()
