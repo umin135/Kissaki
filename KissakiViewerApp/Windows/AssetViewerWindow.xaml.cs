@@ -73,7 +73,7 @@ public partial class AssetViewerWindow : Window
                 System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Images", "defaultHDR.hdr"));
             BuildSkybox(_skyboxTex); // null → fallback dark color
             BuildWorldAxes(50);
-            // Hide cursor during right-click rotation (SizeAll is the default and distracting)
+            // Hide cursor during right-click rotation (ShowCameraTarget=False is set in XAML)
             Viewport3D.CameraController.RotateCursor = Cursors.None;
         };
         Unloaded += (_, _) => CompositionTarget.Rendering -= OnRenderGizmo;
@@ -233,6 +233,16 @@ public partial class AssetViewerWindow : Window
     {
         if (sender is FrameworkElement fe && fe.DataContext is AssetTabItem tab)
             _vm.SelectedTab = tab;
+    }
+
+    // ListBoxes inside the detail ScrollViewer consume wheel events even when they
+    // can't scroll, so the outer ScrollViewer never sees them. PreviewMouseWheel
+    // (tunneling) fires on the ScrollViewer before any inner control sees it.
+    private void DetailScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        var sv = (ScrollViewer)sender;
+        sv.ScrollToVerticalOffset(sv.VerticalOffset - e.Delta / 3.0);
+        e.Handled = true;
     }
 
     // ── Detail panel: selection handlers ─────────────────────────────────────

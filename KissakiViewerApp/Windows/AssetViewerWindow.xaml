@@ -146,8 +146,10 @@
                                    Foreground="{DynamicResource {x:Static adonisUI:Brushes.ForegroundBrush}}"/>
                     </Border>
 
-                    <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                  HorizontalScrollBarVisibility="Disabled">
+                    <ScrollViewer x:Name="DetailScrollViewer"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  PreviewMouseWheel="DetailScrollViewer_PreviewMouseWheel">
                         <StackPanel>
 
                             <!-- Sub-Meshes section -->
@@ -318,6 +320,7 @@
                                        Background="#111111"
                                        ShowCoordinateSystem="False"
                                        ShowViewCube="False"
+                                       ShowCameraTarget="False"
                                        ZoomExtentsWhenLoaded="False"
                                        ContextMenu="{x:Null}">
                     <helix:HelixViewport3D.Style>
