@@ -190,12 +190,19 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (_extractor == null) return;
 
-        string rdbPath   = Path.Combine(_profile.FdataDir, "root.rdb");
-        string gameDir   = _profile.GameDirectory;
-        var    allAssets = Assets.ToList();
+        string rdbPath = Path.Combine(_profile.FdataDir, "root.rdb");
+        string gameDir = _profile.GameDirectory;
 
-        // Try cache first
-        if (TextureMapCache.TryLoad(gameDir, rdbPath, allAssets, out var cached))
+        // Move Assets.ToList() + TryLoad (JSON parse + 78k dict build) off the UI thread.
+        // Without this, the cache-hit path has no await and blocks the UI until it returns.
+        var (allAssets, cached, hasCached) = await Task.Run(() =>
+        {
+            var assets = Assets.ToList();
+            bool hit   = TextureMapCache.TryLoad(gameDir, rdbPath, assets, out var c);
+            return (assets, c, hit);
+        });
+
+        if (hasCached)
         {
             _g1mToG1tMap = cached;
             AppLogger.Info($"[G1mMap] 캐시 로드: {_g1mToG1tMap.Count:N0}개 G1M 연결");

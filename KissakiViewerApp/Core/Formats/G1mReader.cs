@@ -41,6 +41,8 @@ public sealed class G1mSubmesh
     public uint        MatPalId      { get; set; }
     // 0=rigid, 1=NUNO cloth (overlaps rigid mesh with different UV), 2=physics cloth
     public int         ClothId       { get; set; }
+    // LOD level from MeshGroups group header (pos+0 u32): 0=highest quality, 1=lower, …; -1=no group info
+    public int         LodGroup      { get; set; } = -1;
 }
 
 public sealed class G1mData
@@ -72,6 +74,8 @@ public sealed class G1mData
     // G1MG JOINTPALETTES physics palette: per-palette physics bone indices (for clothId=2 submeshes)
     // Built from physIdx & 0xFFFF (middle field of each 12-byte entry).
     public List<uint[]> PhysicsPalettes { get; } = new();
+    // Number of MeshGroups (Section 0x10009) groups; 0=no section, 1=single group (no real LOD), 2+=multiple LOD levels
+    public int LodGroupCount { get; set; }
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────────
@@ -393,9 +397,10 @@ public static class G1mReader
             pos = secEnd;
         }
 
-        var clothInfo = mgSecData >= 0
+        var (clothInfo, lodGroupCount) = mgSecData >= 0
             ? ParseMeshGroupClothIds(data, mgSecData, mgSecEnd, g1mgVersion)
-            : new Dictionary<int, (int clothId, int extId)>();
+            : (new Dictionary<int, (int clothId, int extId, int lodGroup)>(), 0);
+        r.LodGroupCount = lodGroupCount;
 
         r.Submeshes = BuildSubmeshes(rawSubs, vbs, layouts, ibs, clothInfo, pendingCloth, pendingRigid);
     }
@@ -594,27 +599,32 @@ public static class G1mReader
         }
     }
 
-    // ── MeshGroups cloth-ID parser ────────────────────────────────────────────
+    // ── MeshGroups cloth-ID / LOD parser ─────────────────────────────────────
     //
-    // Reads Section 9 (MeshGroups) and returns a map: submeshIndex → (clothId, extId).
+    // Reads Section 9 (MeshGroups) and returns:
+    //   map: submeshIndex → (clothId, extId, lodGroup)
+    //   return groupCount = unique LOD level count (maxLodLevel+1)
+    //
     // clothId values: 0=rigid, 1=NUNO cloth, 2=physics cloth.
-    // extId for NUNO cloth: typically 20000+n where n is the NUNO entry index.
-    private static Dictionary<int, (int clothId, int extId)> ParseMeshGroupClothIds(
+    // lodGroup = LOD level from group header pos+0 (u32); multiple groups can share the same level.
+    private static (Dictionary<int, (int clothId, int extId, int lodGroup)>, int groupCount) ParseMeshGroupClothIds(
         byte[] data, int start, int end, uint version)
     {
-        var result = new Dictionary<int, (int, int)>();
-        if (start + 4 > end) return result;
+        var result = new Dictionary<int, (int, int, int)>();
+        if (start + 4 > end) return (result, 0);
 
         int groupCount = (int)ReadU32(data, start);
         int pos = start + 4;
+        int maxLodLevel = -1;
 
         for (int g = 0; g < groupCount; g++)
         {
-            int sm1, sm2;
+            int sm1, sm2, lodLevel;
 
             if (version > MGVER_GT_0400)        // DOA6: 36-byte group header
             {
                 if (pos + 20 > end) break;
+                lodLevel = (int)ReadU32(data, pos + 0);  // LOD level field (from RDB Explorer)
                 sm1 = (int)ReadU32(data, pos + 12);
                 sm2 = (int)ReadU32(data, pos + 16);
                 pos += 36;
@@ -622,6 +632,7 @@ public static class G1mReader
             else if (version > MGVER_GT_0300)   // 20-byte group header
             {
                 if (pos + 20 > end) break;
+                lodLevel = (int)ReadU32(data, pos + 0);
                 sm1 = (int)ReadU32(data, pos + 12);
                 sm2 = (int)ReadU32(data, pos + 16);
                 pos += 20;
@@ -629,10 +640,13 @@ public static class G1mReader
             else                                // 12-byte group header
             {
                 if (pos + 12 > end) break;
+                lodLevel = (int)ReadU32(data, pos + 0);
                 sm1 = (int)ReadU32(data, pos + 4);
                 sm2 = (int)ReadU32(data, pos + 8);
                 pos += 12;
             }
+
+            if (lodLevel >= 0 && lodLevel < 64) maxLodLevel = Math.Max(maxLodLevel, lodLevel);
 
             int meshCount = sm1 + sm2;
             for (int m = 0; m < meshCount; m++)
@@ -649,7 +663,7 @@ public static class G1mReader
                     for (int i = 0; i < idxCount && pos + 4 <= end; i++, pos += 4)
                     {
                         int smIdx = (int)ReadU32(data, pos);
-                        result.TryAdd(smIdx, (clothId, extId));
+                        result.TryAdd(smIdx, (clothId, extId, lodLevel));
                     }
                 }
                 else
@@ -659,7 +673,9 @@ public static class G1mReader
             }
         }
 
-        return result;
+        // LodGroupCount = unique LOD level count (maxLodLevel+1 assumes 0-based contiguous levels)
+        int uniqueLodCount = maxLodLevel >= 0 ? maxLodLevel + 1 : (groupCount > 0 ? 1 : 0);
+        return (result, uniqueLodCount);
     }
 
     // ── Build submesh geometry ────────────────────────────────────────────────
@@ -667,7 +683,7 @@ public static class G1mReader
     private static G1mSubmesh[] BuildSubmeshes(
         List<RawSubmesh> rawSubs, List<VertexBuffer> vbs,
         List<LayoutEntry> layouts, List<IndexBuffer> ibs,
-        Dictionary<int, (int clothId, int extId)> clothInfo,
+        Dictionary<int, (int clothId, int extId, int lodGroup)> clothInfo,
         List<PendingCloth> pendingCloth,
         List<PendingRigidSkin> pendingRigid)
     {
@@ -676,9 +692,10 @@ public static class G1mReader
         {
             var rs = rawSubs[smIdx];
 
-            clothInfo.TryGetValue(smIdx, out var ci);
-            int clothId = ci.clothId;
-            int extId   = ci.extId;
+            bool inGroup = clothInfo.TryGetValue(smIdx, out var ci);
+            int clothId  = ci.clothId;
+            int extId    = ci.extId;
+            int lodGroup = inGroup ? ci.lodGroup : -1;
 
             // clothId=2 (physics cloth) has the same vertex layout as clothId=0: falls through to rigid path.
 
@@ -812,6 +829,7 @@ public static class G1mReader
                     MaterialIndex = rs.Material,
                     MatPalId      = rs.MatPalId,
                     ClothId       = 1,
+                    LodGroup      = lodGroup,
                 });
 
                 int nunoIdx = extId >= 20000 ? extId % 20000 : extId;
@@ -864,6 +882,7 @@ public static class G1mReader
                     MaterialIndex = rs.Material,
                     MatPalId      = rs.MatPalId,
                     ClothId       = clothId,
+                    LodGroup      = lodGroup,
                 });
                 pendingRigid.Add(new PendingRigidSkin
                 {
@@ -888,6 +907,7 @@ public static class G1mReader
                     MaterialIndex = rs.Material,
                     MatPalId      = rs.MatPalId,
                     ClothId       = clothId,
+                    LodGroup      = lodGroup,
                 });
             }
         }

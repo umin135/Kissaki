@@ -20,11 +20,15 @@ public partial class AssetViewerWindow : Window
     // ── Gizmo / skybox state ─────────────────────────────────────────────────
     private Rect3D    _lastBounds = Rect3D.Empty;
     private Vector3D  _prevLookDir;
+    private Point3D   _prevCamPos;
     private BitmapSource? _skyboxTex;
 
+    // ── Shell outline (3D duplicate, expanded+flipped, back-face only) ────────
+    private readonly List<GeometryModel3D?> _outlineMeshes = [];
+
     // ── 3D scene tracking ─────────────────────────────────────────────────────
-    // Per-submesh: (geometry, front material, _, material index)  — BackMaterial always null (backface culled)
-    private readonly List<(GeometryModel3D? Geo, Material? FrontMat, Material? BackMat, int MatIdx)> _submeshGeos = [];
+    // Per-submesh: (geometry, front material, back material, material index, LOD group)
+    private readonly List<(GeometryModel3D? Geo, Material? FrontMat, Material? BackMat, int MatIdx, int LodGroup)> _submeshGeos = [];
     private AssetTabItem? _subscribedTab;  // tab whose items we hold PropertyChanged refs for
     private int  _selectedSubmesh  = -1;
     private int  _selectedMaterial = -1;
@@ -43,10 +47,6 @@ public partial class AssetViewerWindow : Window
         Color.FromRgb(210,   0, 210),  // magenta
         Color.FromRgb(255, 255, 255),  // white
     ];
-
-    // Highlight material: translucent cyan emissive
-    private static readonly Material s_highlightMat = new DiffuseMaterial(
-        new SolidColorBrush(Color.FromArgb(255, 30, 200, 255)) { Opacity = 0.85 });
 
     private static readonly (string Label, Vector3D Dir, Color Col)[] s_gizmoAxes =
     {
@@ -74,7 +74,8 @@ public partial class AssetViewerWindow : Window
             BuildSkybox(_skyboxTex); // null → fallback dark color
             BuildWorldAxes(50);
             // Hide cursor during right-click rotation (ShowCameraTarget=False is set in XAML)
-            Viewport3D.CameraController.RotateCursor = Cursors.None;
+            if (Viewport3D.CameraController != null)
+                Viewport3D.CameraController.RotateCursor = Cursors.None;
         };
         Unloaded += (_, _) => CompositionTarget.Rendering -= OnRenderGizmo;
     }
@@ -83,9 +84,11 @@ public partial class AssetViewerWindow : Window
 
     private void OnRenderGizmo(object? sender, EventArgs e)
     {
-        if (Viewport3D.Camera is ProjectionCamera cam && cam.LookDirection != _prevLookDir)
+        if (Viewport3D.Camera is not ProjectionCamera cam) return;
+        if (cam.LookDirection != _prevLookDir || cam.Position != _prevCamPos)
         {
             _prevLookDir = cam.LookDirection;
+            _prevCamPos  = cam.Position;
             DrawGizmo();
         }
     }
@@ -227,6 +230,11 @@ public partial class AssetViewerWindow : Window
         {
             RebuildBoneOverlay(tab.G1mData, tab.ShowBones);
         }
+        else if (e.PropertyName == nameof(AssetTabItem.SelectedLodGroup))
+        {
+            if (tab.G1mData?.LodGroupCount > 1)
+                ApplyLodFilter(tab.SelectedLodGroup);
+        }
     }
 
     private void TabHeader_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -308,30 +316,106 @@ public partial class AssetViewerWindow : Window
     private void SetSubmeshVisible(int idx, bool visible)
     {
         if ((uint)idx >= (uint)_submeshGeos.Count) return;
-        var (geo, frontMat, _, _) = _submeshGeos[idx];
+        var (geo, frontMat, _, _, smLodGroup) = _submeshGeos[idx];
         if (geo == null) return;
-        bool highlighted = idx == _selectedSubmesh;
-        geo.Material = visible ? (highlighted ? s_highlightMat : frontMat) : null;
+        var tab   = _vm.SelectedTab;
+        bool hasLods = tab?.G1mData?.LodGroupCount > 1;
+        bool inLod   = !hasLods || smLodGroup < 0 || smLodGroup == (tab?.SelectedLodGroup ?? 0);
+        geo.Material = visible && inLod ? frontMat : null;
     }
 
     private void HighlightSubmesh(int idx, bool highlight)
     {
-        if ((uint)idx >= (uint)_submeshGeos.Count) return;
-        var (geo, frontMat, _, _) = _submeshGeos[idx];
-        if (geo == null) return;
-        bool visible = geo.Material != null || !highlight;
-        if (!visible && !highlight) return;
-        geo.Material = highlight ? s_highlightMat : frontMat;
+        SetShellOutlineVisible(highlight ? [idx] : null);
     }
 
     private void HighlightByMaterial(int matIdx, bool highlight)
     {
+        if (!highlight) { SetShellOutlineVisible(null); return; }
+        var indices = Enumerable.Range(0, _submeshGeos.Count)
+            .Where(i => _submeshGeos[i].MatIdx == matIdx);
+        SetShellOutlineVisible(indices);
+    }
+
+    // Apply LOD filter: hide submeshes not belonging to the selected group.
+    // Submeshes with LodGroup == -1 (no group info) are always shown.
+    private void ApplyLodFilter(int lodGroup)
+    {
+        var tab = _vm.SelectedTab;
         for (int i = 0; i < _submeshGeos.Count; i++)
         {
-            var (geo, frontMat, _, m) = _submeshGeos[i];
-            if (geo == null || m != matIdx) continue;
-            geo.Material = highlight ? s_highlightMat : frontMat;
+            var (geo, frontMat, _, _, smLodGroup) = _submeshGeos[i];
+            if (geo == null) continue;
+
+            bool inLod    = smLodGroup < 0 || smLodGroup == lodGroup;
+            bool userShow = i < (tab?.SubmeshItems.Count ?? 0) ? tab!.SubmeshItems[i].IsVisible : true;
+            bool show     = inLod && userShow;
+
+            geo.Material = show ? frontMat : null;
+            if (!show && (uint)i < (uint)_outlineMeshes.Count && _outlineMeshes[i] is { } ol)
+                ol.Material = null;
         }
+    }
+
+    // ── Shell outline ─────────────────────────────────────────────────────────
+
+    private void SetShellOutlineVisible(IEnumerable<int>? indices)
+    {
+        // Hide all outlines first (Material=null + BackMaterial=null = invisible)
+        foreach (var g in _outlineMeshes)
+            if (g != null) { g.Material = null; g.BackMaterial = null; }
+
+        if (indices == null) return;
+        // Show: Material on the winding-flipped mesh = the inward-facing surfaces,
+        // which are behind the original mesh and only protrude at the silhouette.
+        foreach (var idx in indices)
+            if ((uint)idx < (uint)_outlineMeshes.Count && _outlineMeshes[idx] != null)
+                _outlineMeshes[idx]!.Material = s_outlineMat;
+    }
+
+    // Returns a slightly expanded, winding-flipped duplicate of src for the shell outline.
+    // Only back-faces are rendered (BackMaterial), so it peeks out at the silhouette edges.
+    private static MeshGeometry3D BuildShellOutlineMesh(MeshGeometry3D src, double scale)
+    {
+        int n       = src.Positions.Count;
+        var pos     = src.Positions;
+        var indices = src.TriangleIndices;
+
+        // Per-vertex normals: use mesh normals if present, else compute from face normals
+        var normals = new Vector3D[n];
+        if (src.Normals != null && src.Normals.Count == n)
+        {
+            for (int i = 0; i < n; i++) normals[i] = src.Normals[i];
+        }
+        else
+        {
+            for (int i = 0; i + 2 < indices.Count; i += 3)
+            {
+                int a = indices[i], b = indices[i + 1], c = indices[i + 2];
+                var faceN = Vector3D.CrossProduct(pos[b] - pos[a], pos[c] - pos[a]);
+                normals[a] += faceN; normals[b] += faceN; normals[c] += faceN;
+            }
+        }
+
+        // Expand positions along vertex normals
+        var expandedPos = new Point3DCollection(n);
+        for (int i = 0; i < n; i++)
+        {
+            var nrm = normals[i];
+            if (nrm.LengthSquared > 1e-12) nrm.Normalize();
+            expandedPos.Add(pos[i] + nrm * scale);
+        }
+
+        // Flip winding: ABC → ACB so only the back face (facing outward) is rendered
+        var flippedIdx = new Int32Collection(indices.Count);
+        for (int i = 0; i + 2 < indices.Count; i += 3)
+        {
+            flippedIdx.Add(indices[i]);
+            flippedIdx.Add(indices[i + 2]);
+            flippedIdx.Add(indices[i + 1]);
+        }
+
+        return new MeshGeometry3D { Positions = expandedPos, TriangleIndices = flippedIdx };
     }
 
     // ── Bone overlay ──────────────────────────────────────────────────────────
@@ -355,11 +439,10 @@ public partial class AssetViewerWindow : Window
             BoneRoot.Children.Add(new LinesVisual3D
             {
                 Points    = linePoints,
-                Color     = Color.FromArgb(220, 255, 210, 30),
-                Thickness = 1.5,
+                Color     = Colors.White,
+                Thickness = 1.0,
             });
 
-        // Joint position points
         var jointPoints = new Point3DCollection(model.Bones.Length);
         foreach (var bone in model.Bones)
             jointPoints.Add(ToWpf(bone.WorldPosition));
@@ -367,7 +450,7 @@ public partial class AssetViewerWindow : Window
             BoneRoot.Children.Add(new PointsVisual3D
             {
                 Points = jointPoints,
-                Color  = Color.FromArgb(255, 255, 90, 90),
+                Color  = Colors.White,
                 Size   = 5,
             });
     }
@@ -559,8 +642,18 @@ public partial class AssetViewerWindow : Window
     private static readonly DiffuseMaterial s_fallbackMat =
         new(new SolidColorBrush(Color.FromRgb(180, 180, 190)));
 
-    private static readonly SpecularMaterial s_specMat =
-        new(new SolidColorBrush(Color.FromRgb(60, 60, 80)), 30);
+    // Shell outline: EmissiveMaterial wrapped in MaterialGroup so color is constant regardless of scene lighting.
+    // WPF 3D EmissiveMaterial alone renders as black without a DiffuseMaterial base; here we use
+    // a black DiffuseMaterial so diffuse contribution = 0 and only the emissive (constant) term shows.
+    private static readonly Material s_outlineMat = BuildOutlineMaterial();
+    private static Material BuildOutlineMaterial()
+    {
+        var brush = new SolidColorBrush(Color.FromRgb(0xFF, 0xD4, 0x00));
+        var mg = new MaterialGroup();
+        mg.Children.Add(new DiffuseMaterial(Brushes.Black));
+        mg.Children.Add(new EmissiveMaterial(brush));
+        return mg;
+    }
 
     // Returns true if the Bgra32 BitmapSource contains any pixels with alpha < 250.
     // Samples every 16th pixel for speed; good enough for hair/cloth transparency detection.
@@ -635,6 +728,7 @@ public partial class AssetViewerWindow : Window
         BoneRoot.Children.Clear();
         _lastBounds = Rect3D.Empty;
         GizmoCanvas.Children.Clear();
+        _outlineMeshes.Clear();
         _matUvLayers.Clear();
         _matUvTiling.Clear();
         if (UvMapCanvas  != null) UvMapCanvas.Children.Clear();
@@ -683,7 +777,7 @@ public partial class AssetViewerWindow : Window
             var sm = model.Submeshes[smIdx];
             if (sm.Positions.Length == 0 || sm.Indices.Length == 0)
             {
-                _submeshGeos.Add((null, null, null, sm.MaterialIndex));
+                _submeshGeos.Add((null, null, null, sm.MaterialIndex, sm.LodGroup));
                 continue;
             }
             var mesh = new MeshGeometry3D();
@@ -727,7 +821,7 @@ public partial class AssetViewerWindow : Window
             // Rigid/physics meshes have a flipped-normal copy for the back face → cull.
             Material? backMat = sm.ClothId == 1 ? MakeMeshMaterial(tex) : null;
             var geo = new GeometryModel3D(mesh, frontMat) { BackMaterial = backMat };
-            _submeshGeos.Add((geo, frontMat, backMat, sm.MaterialIndex));
+            _submeshGeos.Add((geo, frontMat, backMat, sm.MaterialIndex, sm.LodGroup));
             if (hasAlpha) pendingAlpha.Add(geo);
             else          pendingOpaque.Add(geo);
         }
@@ -736,7 +830,31 @@ public partial class AssetViewerWindow : Window
         foreach (var g in pendingOpaque) allMeshes.Children.Add(g);
         foreach (var g in pendingAlpha)  allMeshes.Children.Add(g);
 
+        // Build shell outline meshes: scale = 1% of model's max dimension
+        var tmpBounds   = allMeshes.Bounds;
+        double maxDim0  = tmpBounds.IsEmpty ? 1.0
+            : Math.Max(Math.Max(tmpBounds.SizeX, tmpBounds.SizeY), tmpBounds.SizeZ);
+        double shellScale = maxDim0 * 0.005;
+
+        _outlineMeshes.Clear();
+        foreach (var (mainGeo, _, _, _, _) in _submeshGeos)
+        {
+            if (mainGeo?.Geometry is not MeshGeometry3D srcMesh || srcMesh.Positions.Count == 0)
+            {
+                _outlineMeshes.Add(null);
+                continue;
+            }
+            var outlineMesh = BuildShellOutlineMesh(srcMesh, shellScale);
+            var outlineGeo  = new GeometryModel3D(outlineMesh, null) { BackMaterial = null };
+            _outlineMeshes.Add(outlineGeo);
+            allMeshes.Children.Add(outlineGeo);
+        }
+
         SceneRoot.Content = allMeshes.Children.Count > 0 ? allMeshes : null;
+
+        // Apply LOD filter immediately (default to group 0 on first load)
+        if (model.LodGroupCount > 1)
+            ApplyLodFilter(_vm.SelectedTab?.SelectedLodGroup ?? 0);
 
         // Re-subscribe item visibility events for current tab
         var tab = _vm.SelectedTab;

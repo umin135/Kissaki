@@ -17,14 +17,16 @@ public sealed partial class SubmeshItemVM : ObservableObject
 {
     public int    Index         { get; }
     public int    MaterialIndex { get; }
+    public int    LodGroup      { get; }
     public string Name          => $"SubMesh {Index}";
 
     [ObservableProperty] private bool _isVisible = true;
 
-    public SubmeshItemVM(int index, int materialIndex)
+    public SubmeshItemVM(int index, int materialIndex, int lodGroup = -1)
     {
         Index         = index;
         MaterialIndex = materialIndex;
+        LodGroup      = lodGroup;
     }
 }
 
@@ -100,6 +102,20 @@ public sealed partial class AssetTabItem : ObservableObject
     [ObservableProperty] private bool _showBones;
     public ObservableCollection<SubmeshItemVM>    SubmeshItems  { get; } = [];
     public ObservableCollection<MaterialSlotItemVM> MaterialItems { get; } = [];
+
+    // ── LOD selection ──────────────────────────────────────────────────────────
+    // 0 = no group info or single group; 2+ = real LOD levels present
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasMultipleLods))]
+    [NotifyPropertyChangedFor(nameof(LodOptions))]
+    private int _lodGroupCount;
+
+    [ObservableProperty] private int _selectedLodGroup;
+
+    public bool HasMultipleLods => LodGroupCount > 1;
+    public IReadOnlyList<string> LodOptions => LodGroupCount > 1
+        ? Enumerable.Range(0, LodGroupCount).Select(i => $"LOD {i}").ToList()
+        : [];
 
     public AssetTabItem(AssetItemViewModel asset) => Asset = asset;
 }
@@ -456,11 +472,13 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             tab.SubmeshItems.Clear();
             tab.MaterialItems.Clear();
             for (int i = 0; i < model.Submeshes.Length; i++)
-                tab.SubmeshItems.Add(new SubmeshItemVM(i, model.Submeshes[i].MaterialIndex));
+                tab.SubmeshItems.Add(new SubmeshItemVM(i, model.Submeshes[i].MaterialIndex, model.Submeshes[i].LodGroup));
             foreach (var mi in model.Submeshes.Select(s => s.MaterialIndex).Distinct().OrderBy(x => x))
                 tab.MaterialItems.Add(new MaterialSlotItemVM(mi));
 
-            tab.G1mData     = model;
+            tab.LodGroupCount    = model.LodGroupCount;
+            tab.SelectedLodGroup = 0;
+            tab.G1mData          = model;
             tab.PreviewMode = PreviewMode.Model;
             tab.IsLoading   = false;
             int v = model.Submeshes.Sum(s => s.Positions.Length);

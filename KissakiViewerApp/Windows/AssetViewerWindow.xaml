@@ -347,7 +347,7 @@
                     <ModelVisual3D x:Name="SceneRoot"/>
                 </helix:HelixViewport3D>
 
-                <!-- Axis gizmo overlay (bottom-right) -->
+<!-- Axis gizmo overlay (bottom-right) -->
                 <Canvas x:Name="GizmoCanvas"
                         Width="90" Height="90"
                         HorizontalAlignment="Right" VerticalAlignment="Bottom"
@@ -365,6 +365,35 @@
                         </Style>
                     </Canvas.Style>
                 </Canvas>
+
+                <!-- LOD selector (top-left, model mode + multiple LODs only) -->
+                <StackPanel HorizontalAlignment="Left" VerticalAlignment="Top"
+                            Margin="8,8,0,0"
+                            Orientation="Horizontal"
+                            Panel.ZIndex="100">
+                    <StackPanel.Style>
+                        <Style TargetType="StackPanel">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <MultiDataTrigger>
+                                    <MultiDataTrigger.Conditions>
+                                        <Condition Binding="{Binding SelectedTab.PreviewMode}"
+                                                   Value="{x:Static vm:PreviewMode.Model}"/>
+                                        <Condition Binding="{Binding SelectedTab.HasMultipleLods}"
+                                                   Value="True"/>
+                                    </MultiDataTrigger.Conditions>
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </MultiDataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </StackPanel.Style>
+                    <TextBlock Text="LOD"
+                               FontSize="11" VerticalAlignment="Center"
+                               Foreground="#DCDCDC" Margin="0,0,6,0"/>
+                    <ComboBox ItemsSource="{Binding SelectedTab.LodOptions}"
+                              SelectedIndex="{Binding SelectedTab.SelectedLodGroup, Mode=TwoWay}"
+                              FontSize="11" Width="72" Padding="4,2"/>
+                </StackPanel>
 
                 <!-- Bone X-ray toggle (top-right, model mode only) -->
                 <ToggleButton IsChecked="{Binding SelectedTab.ShowBones, FallbackValue=False}"
