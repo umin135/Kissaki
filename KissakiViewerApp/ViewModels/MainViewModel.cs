@@ -171,7 +171,7 @@ public sealed partial class MainViewModel : ObservableObject
 
         BuildTypeFilters();
         AppLogger.Info($"에셋 로드 완료: {Assets.Count:N0}개");
-        StatusText = $"에셋 로드됨 ({Assets.Count:N0}개) — 파일명 복구 중...";
+        StatusText = $"에셋 로드됨 ({Assets.Count:N0}개) — 이름 사전 로드 중...";
 
         await RunNameRecoveryAsync();
 
@@ -238,9 +238,6 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (_extractor == null) return;
 
-        StatusText   = "이름 사전 로드 중...";
-        LoadProgress = 0;
-
         string appId   = AppIdService.GetAppId(_profile.GameDirectory);
         string csvPath = NameDictionaryService.GetCsvPath(appId);
 
@@ -248,40 +245,13 @@ public sealed partial class MainViewModel : ObservableObject
 
         if (File.Exists(csvPath))
         {
-            // CSV 있음 → 바로 로드
             names = await Task.Run(() => NameDictionaryService.Load(csvPath));
             AppLogger.Info($"[NameDictionary] CSV 로드 (AppID={appId}): {names.Count}개");
         }
         else
         {
-            // CSV 없음 → 두 소스로 이름 수집 후 저장
-            var assetsCopy = Assets.ToList();
-            var extractor  = _extractor;
-            var dispatcher = System.Windows.Application.Current?.Dispatcher;
-
-            names = await Task.Run(() =>
-            {
-                var merged = new Dictionary<uint, string>();
-
-                // 소스 1: G1MX/G1COX/G1P 헤더 내장 경로 (대부분 게임에서 작동)
-                dispatcher?.BeginInvoke(() => StatusText = "이름 수집 중 (G1MX/G1COX/G1P)...");
-                var grabbed = NameGrabberService.Grab(assetsCopy, extractor,
-                    pct => dispatcher?.BeginInvoke(() => LoadProgress = pct / 2));
-                foreach (var kv in grabbed) merged[kv.Key] = kv.Value;
-
-                // 소스 2: .name 데이터베이스 파일 (DLC/온디맨드 콘텐츠, 없어도 무방)
-                dispatcher?.BeginInvoke(() => StatusText = "이름 수집 중 (.name 데이터베이스)...");
-                var fromName = NameBuildService.Build(assetsCopy, extractor,
-                    pct => dispatcher?.BeginInvoke(() => LoadProgress = 50 + pct / 2));
-                foreach (var kv in fromName) merged.TryAdd(kv.Key, kv.Value);
-
-                if (merged.Count > 0)
-                    NameDictionaryService.Save(csvPath, merged);
-
-                return merged;
-            });
-
-            AppLogger.Info($"[NameDictionary] 수집 완료 (AppID={appId}): {names.Count}개 → {csvPath}");
+            names = [];
+            AppLogger.Info($"[NameDictionary] CSV 없음 (AppID={appId})");
         }
 
         _nameMap = names;
@@ -289,11 +259,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (_nameMap.TryGetValue(a.Record.FileKtid, out string? n))
                 a.RecoveredName = n;
 
-        LoadProgress = 100;
         int matched = Assets.Count(a => a.RecoveredName != null);
-        StatusText = names.Count > 0
-            ? $"이름 복구 완료: {names.Count:N0}개 항목 / {matched:N0}개 매칭"
-            : $"이름 사전 없음 (AppID={appId})";
         AppLogger.Info($"[NameDictionary] {names.Count}개 로드, {matched}개 적용");
     }
 
