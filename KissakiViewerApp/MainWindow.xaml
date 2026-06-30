@@ -25,18 +25,31 @@
         </Grid.RowDefinitions>
 
         <!-- Menu bar -->
-        <Menu Grid.Row="0"
-              Background="{DynamicResource {x:Static adonisUI:Brushes.Layer1BackgroundBrush}}"
-              BorderThickness="0,0,0,1"
-              BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}"
-              Padding="4,2">
-            <MenuItem Header="View">
-                <MenuItem Header="이름 CSV 다시 로드"
-                          Command="{Binding ReloadNamesCommand}"/>
-            </MenuItem>
-            <MenuItem Header="Settings"/>
-            <MenuItem Header="Help"/>
-        </Menu>
+        <Border Grid.Row="0"
+                Height="30"
+                Background="{DynamicResource {x:Static adonisUI:Brushes.Layer1BackgroundBrush}}"
+                BorderThickness="0,0,0,1"
+                BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}">
+            <Menu HorizontalAlignment="Left"
+                  VerticalAlignment="Center"
+                  Background="Transparent"
+                  BorderThickness="0"
+                  Padding="2,0">
+                <Menu.ItemContainerStyle>
+                    <Style TargetType="MenuItem">
+                        <Setter Property="Padding" Value="12,5"/>
+                        <Setter Property="FontSize" Value="12"/>
+                        <Setter Property="Foreground" Value="{DynamicResource {x:Static adonisUI:Brushes.ForegroundBrush}}"/>
+                    </Style>
+                </Menu.ItemContainerStyle>
+                <MenuItem Header="View">
+                    <MenuItem Header="이름 CSV 다시 로드"
+                              Command="{Binding ReloadNamesCommand}"/>
+                </MenuItem>
+                <MenuItem Header="Settings"/>
+                <MenuItem Header="Help"/>
+            </Menu>
+        </Border>
 
         <!-- Main content -->
         <Grid Grid.Row="1">
@@ -51,7 +64,6 @@
                   Background="{DynamicResource {x:Static adonisUI:Brushes.Layer1BackgroundBrush}}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
@@ -63,16 +75,7 @@
                                Foreground="{DynamicResource {x:Static adonisUI:Brushes.DisabledForegroundBrush}}"/>
                 </Border>
 
-                <Border Grid.Row="1" Padding="8,5"
-                        BorderThickness="0,0,0,1"
-                        BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}">
-                    <CheckBox Content="Restore Asset Name"
-                              FontSize="11"
-                              IsChecked="{Binding RestoreAssetName}"
-                              Foreground="{DynamicResource {x:Static adonisUI:Brushes.ForegroundBrush}}"/>
-                </Border>
-
-                <TreeView Grid.Row="2"
+                <TreeView Grid.Row="1"
                           x:Name="FolderTreeView"
                           ItemsSource="{Binding FolderTree}"
                           BorderThickness="0"

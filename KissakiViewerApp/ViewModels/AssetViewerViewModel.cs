@@ -10,7 +10,7 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace KissakiViewer.ViewModels;
 
 // ── Preview mode enum ─────────────────────────────────────────────────────────
-public enum PreviewMode { None, Texture, Model, Json }
+public enum PreviewMode { None, Texture, Model, Metadata }
 
 // ── Submesh detail item (for 3D detail panel) ─────────────────────────────────
 public sealed partial class SubmeshItemVM : ObservableObject
@@ -82,7 +82,16 @@ public sealed partial class AssetTabItem : ObservableObject
     private PreviewMode _previewMode = PreviewMode.None;
     public bool IsModelMode => PreviewMode == PreviewMode.Model;
 
-    // ── JSON / text preview (KTID, MTL, GRP, …) ───────────────────────────────
+    // ── Preview mode toggle support ────────────────────────────────────────────
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasVisualPreview))]
+    [NotifyPropertyChangedFor(nameof(VisualPreviewLabel))]
+    private PreviewMode _visualMode = PreviewMode.None;
+
+    public bool   HasVisualPreview   => VisualMode is PreviewMode.Texture or PreviewMode.Model;
+    public string VisualPreviewLabel => VisualMode == PreviewMode.Texture ? "2D Preview" : "3D Preview";
+
+    // ── JSON / Metadata text preview ──────────────────────────────────────────
     [ObservableProperty] private string _jsonText = string.Empty;
 
     public bool HasJsonPreview => !string.IsNullOrEmpty(JsonText);
@@ -181,6 +190,20 @@ public sealed partial class AssetViewerViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void SwitchToVisual()
+    {
+        if (SelectedTab is { } tab && tab.HasVisualPreview)
+            tab.PreviewMode = tab.VisualMode;
+    }
+
+    [RelayCommand]
+    private void SwitchToMetadata()
+    {
+        if (SelectedTab is { } tab)
+            tab.PreviewMode = PreviewMode.Metadata;
+    }
+
+    [RelayCommand]
     private void CloseTab(AssetTabItem? tab)
     {
         if (tab == null) return;
@@ -209,10 +232,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             else if (ext == ".mtl")
                 await LoadMtlAsync(tab, ct);
             else
-            {
-                tab.StatusText = $"{ext} — 미리보기 미지원";
-                tab.IsLoading  = false;
-            }
+                await LoadMetadataOnlyAsync(tab, ct);
         }
         catch (Exception ex)
         {
@@ -241,7 +261,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
 
         tab.JsonText    = json;
         tab.StatusText  = $"{nameCount} name groups, {matCount} materials";
-        tab.PreviewMode = PreviewMode.Json;
+        tab.PreviewMode = PreviewMode.Metadata;
         tab.IsLoading   = false;
     }
 
@@ -263,7 +283,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
 
         tab.JsonText    = json;
         tab.StatusText  = $"{count} entries";
-        tab.PreviewMode = PreviewMode.Json;
+        tab.PreviewMode = PreviewMode.Metadata;
         tab.IsLoading   = false;
     }
 
@@ -285,7 +305,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
 
         tab.JsonText    = json;
         tab.StatusText  = $"{count} entries";
-        tab.PreviewMode = PreviewMode.Json;
+        tab.PreviewMode = PreviewMode.Metadata;
         tab.IsLoading   = false;
     }
 
@@ -320,6 +340,8 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 }
             }
 
+            string metaJson = MetadataExtractor.ExtractG1tJson(info, raw.Length, vm.DisplayName, vm.KtidHex);
+
             Application.Current.Dispatcher.Invoke(() =>
             {
                 tab.SlotBitmaps      = slots;
@@ -328,6 +350,8 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 tab.PreviewImage     = slots[0].Bmp;
                 tab.PreviewInfo      = slots[0].Info;
                 tab.StatusText       = $"로드 완료 ({slots.Count}개 슬롯)";
+                tab.JsonText         = metaJson;
+                tab.VisualMode       = PreviewMode.Texture;
                 tab.PreviewMode      = PreviewMode.Texture;
                 tab.IsLoading        = false;
             });
@@ -368,7 +392,13 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             // Resolve G1T: kidsobjdb map → co-located → proximity fallback
             string g1tSrc;
             List<AssetItemViewModel> g1tFileList;
-            if (kidsG1ts is { Count: > 0 }) { g1tFileList = kidsG1ts; g1tSrc = "kidsobjdb"; }
+            if (kidsG1ts is { Count: > 0 })
+            {
+                g1tFileList = kidsG1ts;
+                g1tSrc = "kidsobjdb";
+                int nonNull = kidsG1ts.Count(x => x != null);
+                AppLogger.Info($"[3D] kidsobjdb non-null: {nonNull}/{kidsG1ts.Count}");
+            }
             else if (colocated.Count > 0)   { g1tFileList = colocated; g1tSrc = "colocated"; }
             else                            { g1tFileList = ResolveG1tByProximity(rec.FdataId, vm.RdbName); g1tSrc = "proximity"; }
 
@@ -384,15 +414,20 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 var firstVm = g1tFileList[0];
                 if (firstVm != null)
                 {
-                    byte[] first = _extractor.ExtractToMemory(firstVm.Record, firstVm.Container);
+                    var firstRec = firstVm.Record;
+                    AppLogger.Info($"[3D] G1T[0] rec: FileSize={firstRec.FileSize} SizeInContainer={firstRec.SizeInContainer} FdataOffset={firstRec.FdataOffset} container={firstVm.Container}");
+                    byte[] first = _extractor.ExtractToMemory(firstRec, firstVm.Container);
                     g1tRawCache[0] = first;
+                    string hex8 = first.Length >= 8
+                        ? BitConverter.ToString(first, 0, 8).Replace("-", " ")
+                        : "(short)";
                     var firstInfo = G1tDecoder.Survey(first);
-                    if (firstInfo.Version == "1600")
+                    if (firstInfo.Version is "1600" or "5600")
                     {
                         int rc = firstInfo.Textures.Count(t => t.FmtCode != 0);
                         if (rc > 1) texPerFile = rc;
                     }
-                    AppLogger.Info($"[3D] G1T[0] ver={firstInfo.Version} texPerFile={texPerFile}");
+                    AppLogger.Info($"[3D] G1T[0] ver={firstInfo.Version} valid={firstInfo.Valid} texPerFile={texPerFile} magic=[{hex8}] ktid=0x{firstRec.FileKtid:X8}");
                 }
             }
             catch { }
@@ -425,11 +460,18 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                     catch { continue; }
                     g1tRawCache[fileIdx] = g1tRaw;
                 }
-                if (g1tRaw!.Length < 8 || g1tRaw[0] != 'G') continue;
+                if (g1tRaw!.Length < 8 || g1tRaw[0] != 'G')
+                {
+                    string badHex = g1tRaw.Length >= 4
+                        ? BitConverter.ToString(g1tRaw, 0, Math.Min(4, g1tRaw.Length)).Replace("-", " ")
+                        : "(short)";
+                    AppLogger.Warn($"[3D] G1T[{fileIdx}] bad magic [{badHex}] len={g1tRaw.Length}, skip");
+                    continue;
+                }
 
                 List<(int Slot, SixLabors.ImageSharp.Image<Rgba32> Image)> decoded;
                 try { decoded = G1tDecoder.DecodeAll(g1tRaw); }
-                catch { continue; }
+                catch (Exception ex) { AppLogger.Warn($"[3D] G1T[{fileIdx}] DecodeAll threw: {ex.Message}"); continue; }
 
                 foreach (var (internalSlot, img) in decoded)
                 {
@@ -446,19 +488,27 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 ? model.MaterialTextures.Where(x => x.TexType == 1).Select(x => (x.MatIdx, x.G1tSlot))
                 : model.Submeshes.Select(s => (s.MaterialIndex, s.MaterialIndex)).Distinct();
 
-            var texBitmaps = new Dictionary<int, BitmapSource>();
-            foreach (var (matIdx, g1tSlot) in assignments)
+            // Convert each unique slot image to a frozen BitmapSource exactly once.
+            // Multiple mats can share the same slot, so we must not destroy after first use.
+            var slotBitmaps = new Dictionary<int, BitmapSource>(slotDict.Count);
+            foreach (var (slot, img) in slotDict)
             {
-                if (!slotDict.TryGetValue(g1tSlot, out var img) || img == null) continue;
-                slotDict[g1tSlot] = null!;
+                if (img == null) continue;
                 using (img)
                 {
                     var bmp = MainViewModel.ImageSharpToBitmapSource(img);
                     bmp.Freeze();
-                    texBitmaps[matIdx] = bmp;
+                    slotBitmaps[slot] = bmp;
                 }
             }
-            foreach (var img in slotDict.Values.Where(v => v != null)) img!.Dispose();
+            slotDict.Clear();
+
+            var texBitmaps = new Dictionary<int, BitmapSource>();
+            foreach (var (matIdx, g1tSlot) in assignments)
+            {
+                if (slotBitmaps.TryGetValue(g1tSlot, out var bmp))
+                    texBitmaps[matIdx] = bmp;
+            }
 
             AppLogger.Info($"[3D] texBitmaps keys=[{string.Join(",", texBitmaps.Keys.OrderBy(k=>k))}]");
             foreach (var (matIdx, g1tSlot) in model.MaterialTextures.Where(x => x.TexType == 1).Select(x => (x.MatIdx, x.G1tSlot)))
@@ -488,13 +538,36 @@ public sealed partial class AssetViewerViewModel : ObservableObject
             tab.LodGroupCount    = model.LodGroupCount;
             tab.SelectedLodGroup = 0;
             tab.G1mData          = model;
-            tab.PreviewMode = PreviewMode.Model;
-            tab.IsLoading   = false;
+            tab.JsonText         = MetadataExtractor.ExtractG1mJson(model, vm.DisplayName, vm.KtidHex);
+            tab.VisualMode       = PreviewMode.Model;
+            tab.PreviewMode      = PreviewMode.Model;
+            tab.IsLoading        = false;
             int v = model.Submeshes.Sum(s => s.Positions.Length);
             int t = model.Submeshes.Sum(s => s.Indices.Length / 3);
             tab.StatusText = $"{vm.KtidHex} | {model.Bones.Length} bones | {model.Submeshes.Length} submeshes | {v:N0} verts | {textures.Count} textures";
             tab.PreviewInfo = tab.StatusText;
         });
+    }
+
+    // ── Metadata-only loading (for all formats without visual preview) ────────
+
+    private async Task LoadMetadataOnlyAsync(AssetTabItem tab, CancellationToken ct)
+    {
+        var vm  = tab.Asset;
+        var rec = vm.Record;
+        var cont = vm.Container;
+
+        string json = await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            byte[] raw = _extractor.ExtractToMemory(rec, cont);
+            return MetadataExtractor.ExtractJson(raw, vm.TypeExt, vm.KtidHex, vm.DisplayName);
+        }, ct);
+
+        tab.JsonText    = json;
+        tab.StatusText  = "Metadata 로드 완료";
+        tab.PreviewMode = PreviewMode.Metadata;
+        tab.IsLoading   = false;
     }
 
     private List<AssetItemViewModel> ResolveG1tByProximity(ushort g1mFid, string g1mRdbName)

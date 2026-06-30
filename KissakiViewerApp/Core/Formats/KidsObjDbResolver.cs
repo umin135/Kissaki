@@ -142,13 +142,19 @@ public static class KidsObjDbResolver
                         {
                             // Resolve KTID: prefer per-G1M property link, fall back to first KTID
                             uint ktidFk = 0;
-                            if (g1mToKtidOid.TryGetValue(g1mFk, out uint ktidOid) &&
-                                objIdToKtidFk.TryGetValue(ktidOid, out uint resolvedFk))
+                            bool hasPropLink = g1mToKtidOid.TryGetValue(g1mFk, out uint ktidOid);
+                            if (hasPropLink && objIdToKtidFk.TryGetValue(ktidOid, out uint resolvedFk))
                                 ktidFk = resolvedFk;
+                            else if (hasPropLink && ktidMap.ContainsKey(ktidOid))
+                                ktidFk = ktidOid;  // DOA6: PropKtidLink stores KTID FileKtid directly
                             else if (ktidFileFks.Count > 0)
                                 ktidFk = ktidFileFks[0];
 
-                            if (ktidFk == 0 || !ktidMap.TryGetValue(ktidFk, out var ktidVm)) continue;
+                            if (ktidFk == 0 || !ktidMap.TryGetValue(ktidFk, out var ktidVm))
+                            {
+                                AppLogger.Warn($"[KidsObjDb] G1M 0x{g1mFk:X8}: no KTID (propLink={hasPropLink} ktidFileFks={ktidFileFks.Count} ktidFk=0x{ktidFk:X8} ktidMapHas={ktidMap.ContainsKey(ktidFk)})");
+                                continue;
+                            }
 
                             byte[] ktidData;
                             try { ktidData = extractor.ExtractToMemory(ktidVm.Record, ktidVm.Container); }
@@ -168,18 +174,38 @@ public static class KidsObjDbResolver
                             foreach (int s in slotToObjId.Keys)
                                 if (s > maxSlot) maxSlot = s;
 
+                            // Sanity guard: valid texture slot indices should be small.
+                            // A huge maxSlot means we picked a non-texture KTID (e.g. anim slot map).
+                            if (maxSlot > 4095)
+                            {
+                                AppLogger.Warn($"[KidsObjDb] G1M 0x{g1mFk:X8}: KTID 0x{ktidFk:X8} maxSlot={maxSlot} 너무 큼, 건너뜀");
+                                continue;
+                            }
+
                             var orderedG1ts = new AssetItemViewModel?[maxSlot + 1];
                             bool anySlotMapped = false;
                             for (int s = 0; s <= maxSlot; s++)
                             {
-                                if (slotToObjId.TryGetValue(s, out uint oid) &&
-                                    objIdToG1t.TryGetValue(oid, out var vm))
+                                if (slotToObjId.TryGetValue(s, out uint oid))
                                 {
-                                    orderedG1ts[s] = vm;
-                                    anySlotMapped = true;
+                                    // DOA6: KTID stores DOK internal object_id → resolve via objIdToG1t
+                                    // Ronin: KTID stores G1T FileKtid directly → resolve via g1tMap
+                                    if (!objIdToG1t.TryGetValue(oid, out var vm))
+                                        g1tMap.TryGetValue(oid, out vm);
+                                    if (vm != null)
+                                    {
+                                        orderedG1ts[s] = vm;
+                                        anySlotMapped = true;
+                                    }
                                 }
                             }
-                            if (!anySlotMapped) continue;
+                            if (!anySlotMapped)
+                            {
+                                var ktidSample = string.Join(",", slotToObjId.Values.Take(4).Select(x => $"0x{x:X8}"));
+                                var g1tSample  = string.Join(",", objIdToG1t.Keys.Take(4).Select(x => $"0x{x:X8}"));
+                                AppLogger.Warn($"[KidsObjDb] G1M 0x{g1mFk:X8}: KTID 0x{ktidFk:X8} slots={slotToObjId.Count} maxSlot={maxSlot} — oid mismatch ktidOids=[{ktidSample}] dokG1tOids=[{g1tSample}]");
+                                continue;
+                            }
 
                             var list = orderedG1ts.Select(v => v ?? default!).ToList();
                             while (list.Count > 0 && list[^1] is null) list.RemoveAt(list.Count - 1);
@@ -228,7 +254,10 @@ public static class KidsObjDbResolver
 
                     nextFile:;
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    AppLogger.Error($"[KidsObjDb] DOK 0x{kobj.Record.FileKtid:X8} 처리 예외: {ex.GetType().Name}: {ex.Message}");
+                }
 
                 progress?.Report((++done, total));
             }

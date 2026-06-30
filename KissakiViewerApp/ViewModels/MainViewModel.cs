@@ -55,9 +55,6 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool _isGridView;
 
-    [ObservableProperty]
-    private bool _restoreAssetName = true;
-
     /// <summary>Live log lines streamed from AppLogger — bound to the console panel.</summary>
     public ObservableCollection<string> ConsoleLog { get; } = [];
 
@@ -111,11 +108,6 @@ public sealed partial class MainViewModel : ObservableObject
     partial void OnFilterTextChanged(string value)              => ScheduleFilter();
     partial void OnSelectedTypeFilterChanged(string value)      => ScheduleFilter();
     partial void OnSelectedFolderNodeChanged(FolderNode? value) => ScheduleFilter();
-    partial void OnRestoreAssetNameChanged(bool value)
-    {
-        SelectedFolderNode = null;
-        _ = BuildFolderTreeAsync();
-    }
 
     // ── Load ──────────────────────────────────────────────────────────────────
 
@@ -271,6 +263,7 @@ public sealed partial class MainViewModel : ObservableObject
         StatusText   = "G1M→G1T 매핑 구축 중...";
         _g1mToG1tMap = await KidsObjDbResolver.BuildAsync(allAssets, _extractor);
         StatusText   = $"G1M→G1T 매핑 완료 ({_g1mToG1tMap.Count:N0}개 G1M 연결)";
+        AppLogger.Info($"[G1mMap] 구축 완료: {_g1mToG1tMap.Count:N0}개 G1M 연결");
 
         TextureMapCache.Save(gameDir, rdbPath, _g1mToG1tMap);
     }
@@ -544,18 +537,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ── Folder tree ───────────────────────────────────────────────────────────
 
-    // Instance overload: reads _restoreAssetName from UI thread. Do NOT call from Task.Run.
-    private string GetEffectiveFolderPath(AssetItemViewModel asset) =>
-        GetEffectiveFolderPath(asset, _restoreAssetName);
-
-    // Static overload: safe to call from any thread with an explicitly captured value.
-    private static string GetEffectiveFolderPath(AssetItemViewModel asset, bool restoreNames)
+    private static string GetEffectiveFolderPath(AssetItemViewModel asset)
     {
-        // Each RDB file is a top-level folder in the tree (e.g. "root.rdb", "system.rdb").
         string prefix = asset.RdbName + "/";
-
-        if (!restoreNames)
-            return prefix + KtidExtension.GetCategory(asset.Record.TypeKtid);
 
         if (asset.RecoveredName is { } rn)
         {
@@ -565,13 +549,12 @@ public sealed partial class MainViewModel : ObservableObject
             return string.IsNullOrEmpty(sub) ? prefix + "Content" : prefix + "Content/" + sub;
         }
 
-        return prefix + "Content (Unrecovered)/" + KtidExtension.GetCategory(asset.Record.TypeKtid);
+        return prefix + "Content (Unrecovered)";
     }
 
     private async Task BuildFolderTreeAsync()
     {
-        var assets       = Assets.ToList();
-        bool restoreNames = RestoreAssetName;
+        var assets = Assets.ToList();
 
         var r = await Task.Run(() =>
         {
@@ -580,12 +563,12 @@ public sealed partial class MainViewModel : ObservableObject
 
             foreach (var asset in assets)
             {
-                string folderPath = GetEffectiveFolderPath(asset, restoreNames);
+                string folderPath = GetEffectiveFolderPath(asset);
                 if (string.IsNullOrEmpty(folderPath)) continue;
                 EnsurePath(folderPath, nodeMap, rootList);
             }
 
-            int unkCount = assets.Count(a => string.IsNullOrEmpty(GetEffectiveFolderPath(a, restoreNames)));
+            int unkCount = assets.Count(a => string.IsNullOrEmpty(GetEffectiveFolderPath(a)));
 
             rootList.Sort((a, b) =>
             {
@@ -654,11 +637,10 @@ public sealed partial class MainViewModel : ObservableObject
 
     private async Task ApplyFilterAsync(CancellationToken ct = default)
     {
-        string text        = FilterText.Trim().ToLowerInvariant();
-        string type        = SelectedTypeFilter;
-        var    folder      = SelectedFolderNode;
-        var    assets      = Assets;          // stable reference — not modified after LoadAsync
-        bool   restoreNames = RestoreAssetName;
+        string text   = FilterText.Trim().ToLowerInvariant();
+        string type   = SelectedTypeFilter;
+        var    folder = SelectedFolderNode;
+        var    assets = Assets;          // stable reference — not modified after LoadAsync
 
         List<AssetItemViewModel> filtered;
         try
@@ -669,10 +651,10 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     null               => (IEnumerable<AssetItemViewModel>)assets,
                     { IsUnknown: true } => assets.Where(a =>
-                        string.IsNullOrEmpty(GetEffectiveFolderPath(a, restoreNames))),
+                        string.IsNullOrEmpty(GetEffectiveFolderPath(a))),
                     FolderNode fn      => assets.Where(a =>
                     {
-                        string fp = GetEffectiveFolderPath(a, restoreNames);
+                        string fp = GetEffectiveFolderPath(a);
                         return fp.Equals(fn.FullPath, StringComparison.OrdinalIgnoreCase) ||
                                fp.StartsWith(fn.FullPath + "/", StringComparison.OrdinalIgnoreCase);
                     }),

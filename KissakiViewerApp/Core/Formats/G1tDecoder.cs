@@ -93,9 +93,9 @@ public static class G1tDecoder
         if (tableBase + 4 > data.Length)
             return new G1TFileInfo(false, version, texCount, []);
 
-        // "1600" format: the offset table has only ONE 4-byte entry (offset to tex0).
+        // "1600" / "5600" format: the offset table has only ONE 4-byte entry (offset to tex0).
         // All subsequent textures are stored sequentially. "0600" uses a full N-entry table.
-        bool sequential = version == "1600";
+        bool sequential = version is "1600" or "5600";
 
         var texInfos = new List<G1TTexInfo>();
         int nextEp = -1;

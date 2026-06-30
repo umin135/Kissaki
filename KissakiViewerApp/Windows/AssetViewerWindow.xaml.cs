@@ -29,6 +29,7 @@ public partial class AssetViewerWindow : Window
     private readonly List<GeometryModel3D?> _outlineMeshes = [];
     private Model3DGroup? _allMeshes;   // scene root content; held so lazy outlines can be added
     private double        _shellScale;  // stored at load time for use during lazy build
+    private CancellationTokenSource? _outlineCts;
 
     // ── 3D scene tracking ─────────────────────────────────────────────────────
     // Per-submesh: (geometry, front material, back material, material index, LOD group)
@@ -247,6 +248,12 @@ public partial class AssetViewerWindow : Window
             _vm.SelectedTab = tab;
     }
 
+    private void SubTab_Visual_Click(object sender, MouseButtonEventArgs e)
+        => _vm.SwitchToVisualCommand.Execute(null);
+
+    private void SubTab_Metadata_Click(object sender, MouseButtonEventArgs e)
+        => _vm.SwitchToMetadataCommand.Execute(null);
+
     // ListBoxes inside the detail ScrollViewer consume wheel events even when they
     // can't scroll, so the outer ScrollViewer never sees them. PreviewMouseWheel
     // (tunneling) fires on the ScrollViewer before any inner control sees it.
@@ -363,79 +370,126 @@ public partial class AssetViewerWindow : Window
 
     // ── Shell outline ─────────────────────────────────────────────────────────
 
-    private void SetShellOutlineVisible(IEnumerable<int>? indices)
+    // Outline mesh builds can be expensive (O(n_vertices + n_triangles)).
+    // We snapshot mesh data on the UI thread, then build in parallel on the thread pool,
+    // and dispatch the results back. A CTS cancels in-flight builds when selection changes.
+    private async void SetShellOutlineVisible(IEnumerable<int>? indices)
     {
-        // Hide all currently-built outlines (null slots are already invisible).
+        _outlineCts?.Cancel();
+        var cts = _outlineCts = new CancellationTokenSource();
+
         foreach (var g in _outlineMeshes)
             if (g != null) { g.Material = null; g.BackMaterial = null; }
 
         if (indices == null) return;
 
-        foreach (var idx in indices)
-        {
-            if ((uint)idx >= (uint)_outlineMeshes.Count) continue;
+        var idxList = indices.Where(i => (uint)i < (uint)_outlineMeshes.Count).ToList();
 
-            // Build on first selection — avoids the O(n_submeshes × n_vertices) work at load time.
-            if (_outlineMeshes[idx] == null && _allMeshes != null)
+        // Snapshot mesh data on UI thread, then fan out to thread pool
+        var needBuild = idxList
+            .Where(i => _outlineMeshes[i] == null && _allMeshes != null)
+            .Select(i =>
             {
-                var srcMesh = _submeshGeos[idx].Geo?.Geometry as MeshGeometry3D;
-                if (srcMesh is { Positions.Count: > 0 })
+                var srcMesh = _submeshGeos[i].Geo?.Geometry as MeshGeometry3D;
+                return (idx: i, snap: srcMesh is { Positions.Count: > 0 }
+                    ? SnapshotMesh(srcMesh) : (MeshSnapshot?)null);
+            })
+            .Where(t => t.snap.HasValue)
+            .ToList();
+
+        if (needBuild.Count > 0)
+        {
+            double scale = _shellScale;
+            (int idx, MeshGeometry3D? mesh)[] results;
+            try
+            {
+                results = await Task.WhenAll(needBuild.Select(t => Task.Run(() =>
+                    (t.idx, BuildOutlineMeshFromSnapshot(t.snap!.Value, scale)), cts.Token)));
+            }
+            catch (OperationCanceledException) { return; }
+
+            if (cts.IsCancellationRequested) return;
+
+            foreach (var (idx, outlineMesh) in results)
+            {
+                if (outlineMesh != null)
                 {
-                    var outlineMesh = BuildShellOutlineMesh(srcMesh, _shellScale);
-                    var outlineGeo  = new GeometryModel3D(outlineMesh, null) { BackMaterial = null };
+                    var outlineGeo = new GeometryModel3D(outlineMesh, null) { BackMaterial = null };
                     _outlineMeshes[idx] = outlineGeo;
-                    _allMeshes.Children.Add(outlineGeo);
+                    _allMeshes!.Children.Add(outlineGeo);
+                }
+                else
+                {
+                    _outlineMeshes[idx] = new GeometryModel3D(); // sentinel: skip on next selection
                 }
             }
-
-            if (_outlineMeshes[idx] is { } built)
-                built.Material = s_outlineMat;
         }
+
+        if (cts.IsCancellationRequested) return;
+
+        foreach (int idx in idxList)
+            if (_outlineMeshes[idx] is { Geometry: not null } built)
+                built.Material = s_outlineMat;
     }
 
-    // Returns a slightly expanded, winding-flipped duplicate of src for the shell outline.
-    // Only back-faces are rendered (BackMaterial), so it peeks out at the silhouette edges.
-    private static MeshGeometry3D BuildShellOutlineMesh(MeshGeometry3D src, double scale)
-    {
-        int n       = src.Positions.Count;
-        var pos     = src.Positions;
-        var indices = src.TriangleIndices;
+    private record struct MeshSnapshot(Point3D[] Positions, int[] Indices, Vector3D[]? Normals);
 
-        // Per-vertex normals: use mesh normals if present, else compute from face normals
-        var normals = new Vector3D[n];
-        if (src.Normals != null && src.Normals.Count == n)
+    // Capture mesh data into plain arrays on the UI thread — safe to pass to Task.Run.
+    private static MeshSnapshot SnapshotMesh(MeshGeometry3D src)
+    {
+        var pos = new Point3D[src.Positions.Count];
+        src.Positions.CopyTo(pos, 0);
+        var idx = new int[src.TriangleIndices.Count];
+        src.TriangleIndices.CopyTo(idx, 0);
+        Vector3D[]? nrm = null;
+        if (src.Normals is { } normals && normals.Count == pos.Length)
         {
-            for (int i = 0; i < n; i++) normals[i] = src.Normals[i];
+            nrm = new Vector3D[normals.Count];
+            normals.CopyTo(nrm, 0);
         }
-        else
+        return new MeshSnapshot(pos, idx, nrm);
+    }
+
+    // Build a slightly expanded, winding-flipped outline mesh from snapshotted arrays.
+    // Safe to call from any thread. Returns a frozen MeshGeometry3D.
+    private static MeshGeometry3D? BuildOutlineMeshFromSnapshot(MeshSnapshot snap, double scale)
+    {
+        int n = snap.Positions.Length;
+        if (n == 0 || snap.Indices.Length < 3) return null;
+
+        var normals = snap.Normals ?? new Vector3D[n];
+        if (snap.Normals == null)
         {
-            for (int i = 0; i + 2 < indices.Count; i += 3)
+            for (int i = 0; i + 2 < snap.Indices.Length; i += 3)
             {
-                int a = indices[i], b = indices[i + 1], c = indices[i + 2];
-                var faceN = Vector3D.CrossProduct(pos[b] - pos[a], pos[c] - pos[a]);
+                int a = snap.Indices[i], b = snap.Indices[i + 1], c = snap.Indices[i + 2];
+                if ((uint)a >= (uint)n || (uint)b >= (uint)n || (uint)c >= (uint)n) continue;
+                var faceN = Vector3D.CrossProduct(
+                    snap.Positions[b] - snap.Positions[a],
+                    snap.Positions[c] - snap.Positions[a]);
                 normals[a] += faceN; normals[b] += faceN; normals[c] += faceN;
             }
         }
 
-        // Expand positions along vertex normals
         var expandedPos = new Point3DCollection(n);
         for (int i = 0; i < n; i++)
         {
             var nrm = normals[i];
             if (nrm.LengthSquared > 1e-12) nrm.Normalize();
-            expandedPos.Add(pos[i] + nrm * scale);
+            expandedPos.Add(snap.Positions[i] + nrm * scale);
         }
 
-        // Flip winding: ABC → ACB so only the back face (facing outward) is rendered
-        var flippedIdx = new Int32Collection(indices.Count);
-        for (int i = 0; i + 2 < indices.Count; i += 3)
+        var flippedIdx = new Int32Collection(snap.Indices.Length);
+        for (int i = 0; i + 2 < snap.Indices.Length; i += 3)
         {
-            flippedIdx.Add(indices[i]);
-            flippedIdx.Add(indices[i + 2]);
-            flippedIdx.Add(indices[i + 1]);
+            flippedIdx.Add(snap.Indices[i]);
+            flippedIdx.Add(snap.Indices[i + 2]);
+            flippedIdx.Add(snap.Indices[i + 1]);
         }
 
-        return new MeshGeometry3D { Positions = expandedPos, TriangleIndices = flippedIdx };
+        var result = new MeshGeometry3D { Positions = expandedPos, TriangleIndices = flippedIdx };
+        result.Freeze();
+        return result;
     }
 
     // ── Bone overlay ──────────────────────────────────────────────────────────

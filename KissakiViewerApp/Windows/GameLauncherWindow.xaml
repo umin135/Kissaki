@@ -2,12 +2,16 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:adonisUI="clr-namespace:AdonisUI;assembly=AdonisUI"
+        xmlns:converters="clr-namespace:KissakiViewer.Converters"
         Title="Kissaki"
         Width="640" Height="400"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen"
         Style="{DynamicResource {x:Type Window}}">
 
+    <Window.Resources>
+        <converters:ExeIconConverter x:Key="ExeIconConverter"/>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -67,16 +71,19 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <!-- Placeholder icon -->
-                        <Border Grid.Column="0" Width="24" Height="24"
-                                CornerRadius="4"
-                                Background="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}"
-                                VerticalAlignment="Center">
-                            <TextBlock Text="G" FontSize="11" FontWeight="Bold"
-                                       Foreground="White"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"/>
-                        </Border>
+                        <!-- Game icon: exe icon layered over "G" fallback -->
+                        <Grid Grid.Column="0" Width="32" Height="32" VerticalAlignment="Center">
+                            <Border CornerRadius="4"
+                                    Background="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}">
+                                <TextBlock Text="G" FontSize="11" FontWeight="Bold"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"/>
+                            </Border>
+                            <Image Source="{Binding ExePath, Converter={StaticResource ExeIconConverter}}"
+                                   Width="32" Height="32"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                        </Grid>
 
                         <!-- Name + path -->
                         <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="8,0,8,0">

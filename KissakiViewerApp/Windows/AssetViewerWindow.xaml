@@ -117,14 +117,139 @@
 
         <!-- Content area -->
         <Grid Grid.Row="1">
-            <Grid.ColumnDefinitions>
-                <!-- Left detail panel: Width=Auto → collapses to 0 when content is Collapsed -->
-                <ColumnDefinition Width="Auto"/>
-                <!-- Drag handle -->
-                <ColumnDefinition Width="Auto"/>
-                <!-- Main viewport / preview -->
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!-- Preview mode subtab bar (full width — shown only for visual-preview tabs) -->
+            <Border Grid.Row="0"
+                    Background="{DynamicResource {x:Static adonisUI:Brushes.Layer1BackgroundBrush}}"
+                    BorderThickness="0,0,0,1"
+                    BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}"
+                    Visibility="{Binding SelectedTab.HasVisualPreview,
+                                         FallbackValue=Collapsed,
+                                         Converter={StaticResource BoolToVis}}">
+                <StackPanel Orientation="Horizontal">
+                    <!-- Visual preview subtab -->
+                    <Border MouseLeftButtonDown="SubTab_Visual_Click" Cursor="Hand">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Setter Property="Background" Value="Transparent"/>
+                                <Style.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#14FFFFFF"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="2"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0"
+                                       Text="{Binding SelectedTab.VisualPreviewLabel}"
+                                       Padding="16,8" FontSize="12" VerticalAlignment="Center">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Opacity" Value="0.45"/>
+                                        <Setter Property="FontWeight" Value="Normal"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource {x:Static adonisUI:Brushes.ForegroundBrush}}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                                         Value="{x:Static vm:PreviewMode.Texture}">
+                                                <Setter Property="Opacity" Value="1.0"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                                         Value="{x:Static vm:PreviewMode.Model}">
+                                                <Setter Property="Opacity" Value="1.0"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <Rectangle Grid.Row="1" Fill="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}">
+                                <Rectangle.Style>
+                                    <Style TargetType="Rectangle">
+                                        <Setter Property="Visibility" Value="Hidden"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                                         Value="{x:Static vm:PreviewMode.Texture}">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                                         Value="{x:Static vm:PreviewMode.Model}">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Rectangle.Style>
+                            </Rectangle>
+                        </Grid>
+                    </Border>
+                    <!-- Metadata subtab -->
+                    <Border MouseLeftButtonDown="SubTab_Metadata_Click" Cursor="Hand">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Setter Property="Background" Value="Transparent"/>
+                                <Style.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#14FFFFFF"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="2"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0"
+                                       Text="Metadata"
+                                       Padding="16,8" FontSize="12" VerticalAlignment="Center">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Opacity" Value="0.45"/>
+                                        <Setter Property="FontWeight" Value="Normal"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource {x:Static adonisUI:Brushes.ForegroundBrush}}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                                         Value="{x:Static vm:PreviewMode.Metadata}">
+                                                <Setter Property="Opacity" Value="1.0"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <Rectangle Grid.Row="1" Fill="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}">
+                                <Rectangle.Style>
+                                    <Style TargetType="Rectangle">
+                                        <Setter Property="Visibility" Value="Hidden"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                                         Value="{x:Static vm:PreviewMode.Metadata}">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Rectangle.Style>
+                            </Rectangle>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </Border>
+
+            <!-- Detail panel + Viewport (Row 1) -->
+            <Grid Grid.Row="1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
 
             <!-- ── Left: G1M detail panel (model mode only) ───────────────── -->
             <Border Grid.Column="0"
@@ -285,9 +410,34 @@
                             </Style.Triggers>
                         </Style>
                     </ScrollViewer.Style>
-                    <Image Source="{Binding SelectedTab.PreviewImage}"
-                           Stretch="Uniform" Margin="8"
-                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                    <Grid>
+                        <Rectangle>
+                            <Rectangle.Fill>
+                                <DrawingBrush TileMode="Tile" Viewport="0,0,16,16" ViewportUnits="Absolute">
+                                    <DrawingBrush.Drawing>
+                                        <DrawingGroup>
+                                            <GeometryDrawing Brush="#FFFFFF">
+                                                <GeometryDrawing.Geometry>
+                                                    <RectangleGeometry Rect="0,0,16,16"/>
+                                                </GeometryDrawing.Geometry>
+                                            </GeometryDrawing>
+                                            <GeometryDrawing Brush="#CCCCCC">
+                                                <GeometryDrawing.Geometry>
+                                                    <GeometryGroup>
+                                                        <RectangleGeometry Rect="0,0,8,8"/>
+                                                        <RectangleGeometry Rect="8,8,8,8"/>
+                                                    </GeometryGroup>
+                                                </GeometryDrawing.Geometry>
+                                            </GeometryDrawing>
+                                        </DrawingGroup>
+                                    </DrawingBrush.Drawing>
+                                </DrawingBrush>
+                            </Rectangle.Fill>
+                        </Rectangle>
+                        <Image Source="{Binding SelectedTab.PreviewImage}"
+                               Stretch="Uniform" Margin="8"
+                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                    </Grid>
                 </ScrollViewer>
 
                 <!-- JSON / text preview (PreviewMode.Json) -->
@@ -307,7 +457,7 @@
                             <Setter Property="Visibility" Value="Collapsed"/>
                             <Style.Triggers>
                                 <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
-                                             Value="{x:Static vm:PreviewMode.Json}">
+                                             Value="{x:Static vm:PreviewMode.Metadata}">
                                     <Setter Property="Visibility" Value="Visible"/>
                                 </DataTrigger>
                             </Style.Triggers>
@@ -420,6 +570,8 @@
                 </ToggleButton>
 
             </Grid><!-- /Main content -->
+
+            </Grid><!-- /Detail + Viewport -->
 
         </Grid><!-- /Content area -->
 

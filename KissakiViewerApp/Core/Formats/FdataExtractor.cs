@@ -43,7 +43,12 @@ public sealed class FdataExtractor
         }
         if (raw.Length < IDRK_SIZE) return [];
 
-        return ParseAndDecompress(raw);
+        byte[] result = ParseAndDecompress(raw);
+        if (result.Length > 0) return result;
+
+        // Fallback: some games store assets uncompressed without IDRK wrapping.
+        // If the raw block starts with a known file magic, return it directly.
+        return TryRawFallback(raw, rec.FileSize);
     }
 
     /// <summary>
@@ -76,7 +81,12 @@ public sealed class FdataExtractor
     private byte[] ParseAndDecompress(byte[] raw)
     {
         // Verify IDRK magic
-        if (raw[0] != 'I' || raw[1] != 'D' || raw[2] != 'R' || raw[3] != 'K') return [];
+        if (raw[0] != 'I' || raw[1] != 'D' || raw[2] != 'R' || raw[3] != 'K')
+        {
+            string magic = BitConverter.ToString(raw, 0, Math.Min(16, raw.Length)).Replace("-", " ");
+            AppLogger.Warn($"[FData] non-IDRK block: first16=[{magic}] totalLen={raw.Length}");
+            return [];
+        }
 
         long compressedSize   = ReadI64(raw, 0x10);
         long uncompressedSize = ReadI64(raw, 0x18);
@@ -85,7 +95,15 @@ public sealed class FdataExtractor
         int payloadStart = overhead;
         int payloadSize  = (int)compressedSize;
 
-        if (payloadStart < 0 || payloadStart + payloadSize > raw.Length) return [];
+        if (payloadStart < 0 || payloadStart + payloadSize > raw.Length)
+        {
+            AppLogger.Warn($"[FData] IDRK bad range: payloadStart={payloadStart} payloadSize={payloadSize} rawLen={raw.Length}");
+            return [];
+        }
+
+        // compSz == uncompSz → stored uncompressed, skip decompressor
+        if (compressedSize == uncompressedSize)
+            return raw[payloadStart..(payloadStart + payloadSize)];
 
         try
         {
@@ -99,6 +117,28 @@ public sealed class FdataExtractor
             return [];
         }
     }
+
+    private static byte[] TryRawFallback(byte[] raw, ulong fileSize)
+    {
+        if (raw.Length < 4) return [];
+        if (!IsKnownAssetMagic(raw)) return [];
+
+        int take = fileSize > 0 && (ulong)raw.Length >= fileSize
+            ? (int)fileSize
+            : raw.Length;
+        AppLogger.Info($"[FData] raw fallback: take={take} of totalLen={raw.Length}");
+        return raw[..take];
+    }
+
+    private static bool IsKnownAssetMagic(byte[] b) => b.Length >= 4 && (
+        (b[0] == 'G' && b[1] == 'T' && b[2] == '1' && b[3] == 'G') || // G1T
+        (b[0] == 'G' && b[1] == '1' && b[2] == 'M' && b[3] == '_') || // G1M
+        (b[0] == 'G' && b[1] == '1' && b[2] == 'A' && b[3] == '_') || // G1A
+        (b[0] == '_' && b[1] == 'D' && b[2] == 'O' && b[3] == 'K') || // KidsObjDb
+        (b[0] == 'A' && b[1] == 'S' && b[2] == 'R' && b[3] == 'S') || // SRSA
+        (b[0] == 'G' && b[1] == 'R' && b[2] == 'P' && b[3] == '_') || // GRP
+        (b[0] == '_' && b[1] == 'N' && b[2] == '1' && b[3] == 'G')    // G1N
+    );
 
     private byte[]? ReadRaw(string containerName, ulong offset, uint size)
     {
