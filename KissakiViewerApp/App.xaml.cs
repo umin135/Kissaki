@@ -16,6 +16,14 @@ public partial class App : Application
             args.Handled = true;
         };
 
+        // Background-thread exceptions (not caught by DispatcherUnhandledException).
+        // Log them before the CLR terminates the process.
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            if (args.ExceptionObject is Exception ex)
+                AppLogger.Exception("UnhandledException (background thread)", ex);
+        };
+
         // Prevent OnLastWindowClose from killing the app while the launcher is closing
         // but before MainWindow is shown (no windows open in that gap).
         ShutdownMode = ShutdownMode.OnExplicitShutdown;

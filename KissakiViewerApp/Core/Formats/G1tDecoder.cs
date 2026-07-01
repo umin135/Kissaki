@@ -10,15 +10,19 @@ using System.Text;
 namespace KissakiViewer.Core.Formats;
 
 /// <summary>
-/// Decodes KatanaEngine GT1G texture files (version "0600" / "1600").
+/// Decodes KatanaEngine GT1G texture files (version "0600" / "1600" / "5600" / "6600").
 /// Uses BCnEncoder.NET for BCn block decompression (no native DLL required).
 /// </summary>
 public static class G1tDecoder
 {
-    // ── EX_SWIZZLE_TYPE constants ─────────────────────────────────────────────
+    // ── EX_SWIZZLE_TYPE constants (bitfield) ─────────────────────────────────
+    // Bit 0 (0x01): D3D12 64KB tile swizzle applied to the pixel data.
+    // Bit 1 (0x02): ZLIB chunked compression applied on top of (or before) the swizzle.
+    // 0x01 = DX12 only, 0x02 = ZLIB only (rare), 0x03 = DX12 + ZLIB (most common on newer titles).
     private const byte EX_SWIZZLE_NONE      = 0x00;
     private const byte EX_SWIZZLE_DX12_64KB = 0x01;
-    private const byte EX_SWIZZLE_ZLIB      = 0x03;
+    private const byte EX_SWIZZLE_ZLIB_BIT  = 0x02;
+    private const byte EX_SWIZZLE_ZLIB      = 0x03; // legacy alias: DX12 | ZLIB_BIT
 
     // ── Format code table ────────────────────────────────────────────────────
 
@@ -93,9 +97,9 @@ public static class G1tDecoder
         if (tableBase + 4 > data.Length)
             return new G1TFileInfo(false, version, texCount, []);
 
-        // "1600" / "5600" format: the offset table has only ONE 4-byte entry (offset to tex0).
+        // "1600" / "5600" / "6600" format: the offset table has only ONE 4-byte entry (offset to tex0).
         // All subsequent textures are stored sequentially. "0600" uses a full N-entry table.
-        bool sequential = version is "1600" or "5600";
+        bool sequential = version is "1600" or "5600" or "6600";
 
         var texInfos = new List<G1TTexInfo>();
         int nextEp = -1;
@@ -169,7 +173,7 @@ public static class G1tDecoder
             bool fmtKnown = s_fmtMap.TryGetValue(fmtCode, out var fd);
             if (sequential && fmtCode == 0)
                 nextEp = ep + 8; // null/placeholder slot — fixed 8-byte header, no pixel data
-            else if (sequential && fmtKnown && exSwizzleType != EX_SWIZZLE_ZLIB)
+            else if (sequential && fmtKnown && (exSwizzleType & EX_SWIZZLE_ZLIB_BIT) == 0)
                 nextEp = pixStart + ComputeMipChainSize(fd!, w, h, mipCount);
 
             AppLogger.Info($"  G1T[{i}] ep=0x{ep:x} fmt=0x{fmtCode:x2}({GetFormatName(fmtCode)}) {w}x{h} mips={mipCount} extSize={extSize} swizzle=0x{exSwizzleType:x2} pixStart=0x{pixStart:x}" +
@@ -188,7 +192,7 @@ public static class G1tDecoder
                                         GetFormatName(fmtCode), pixStart, exSwizzleType));
 
             // In sequential mode, stop if format unknown or ZLIB-compressed (can't compute next offset)
-            if (sequential && fmtCode != 0 && (!fmtKnown || exSwizzleType == EX_SWIZZLE_ZLIB))
+            if (sequential && fmtCode != 0 && (!fmtKnown || (exSwizzleType & EX_SWIZZLE_ZLIB_BIT) != 0))
             {
                 if (!fmtKnown)
                     AppLogger.Warn($"  G1T sequential: unknown fmt=0x{fmtCode:x2} at slot {i}, cannot compute mip size → stopping");
@@ -224,7 +228,7 @@ public static class G1tDecoder
             byte[] srcData;
             int    srcOffset;
 
-            if (t.ExSwizzleType == EX_SWIZZLE_ZLIB)
+            if ((t.ExSwizzleType & EX_SWIZZLE_ZLIB_BIT) != 0)
             {
                 srcData   = DecompressZlibTexture(data, t.PixelStart);
                 srcOffset = 0;
@@ -239,8 +243,8 @@ public static class G1tDecoder
             int pixSize = ComputeBlockSize(fd, t.Width, t.Height);
             if (pixSize == 0 || srcOffset + pixSize > srcData.Length) continue;
 
-            // DX12 64KB tile deswizzle (needed for newer platform assets)
-            if (t.ExSwizzleType == EX_SWIZZLE_DX12_64KB && fd.Kind == FmtKind.BCn && pixSize > 65536)
+            // DX12 64KB tile deswizzle — runs after ZLIB if both bits are set (EX_SWIZZLE=0x03)
+            if ((t.ExSwizzleType & EX_SWIZZLE_DX12_64KB) != 0 && fd.Kind == FmtKind.BCn && pixSize > 65536)
             {
                 byte[] tile = new byte[pixSize];
                 Array.Copy(srcData, srcOffset, tile, 0, pixSize);

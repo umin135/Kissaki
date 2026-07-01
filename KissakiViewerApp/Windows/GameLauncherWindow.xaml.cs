@@ -1,5 +1,7 @@
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using KissakiViewer.Models;
 using KissakiViewer.ViewModels;
 
@@ -31,6 +33,18 @@ public partial class GameLauncherWindow : Window
 
     private void GameListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        // Only act when the click originated from a ListViewItem.
+        // Without this, clicking empty space below items (or the scroll bar) with a previously
+        // selected game would silently close the launcher.
+        var hit = e.OriginalSource as DependencyObject;
+        while (hit != null && hit is not ListViewItem)
+        {
+            var parent = VisualTreeHelper.GetParent(hit);
+            if (parent == null) return;   // reached the visual root without hitting an item
+            hit = parent;
+        }
+        if (hit is not ListViewItem) return;
+
         if (_vm.SelectedGame != null && _vm.SelectCommand.CanExecute(null))
             _vm.SelectCommand.Execute(null);
     }

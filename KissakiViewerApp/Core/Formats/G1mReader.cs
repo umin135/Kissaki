@@ -91,13 +91,14 @@ public static class G1mReader
     private const uint SIG_NUNO = 0x4E554E4F; // "NUNO"
 
     // Inner section magic for NUNO1 entries
-    private const uint NUNO_SEC_NUNO1 = 0x00030001;
+    private const uint NUNO_SEC_NUNO1 = 0x00030004;
 
     // G1M outer version thresholds for NUNO dataOffset (from RDB Explorer ParseNuno1Entry).
     // The version read from NUNO_CHUNK+4 is the G1M file version as an ASCII u32 (e.g. "0039").
     // DOA6 version = 0x30303239 satisfies BOTH conditions → dataOffset = entryStart + 24 + 0x3C + 0x20
     private const uint NUVER_GT_0023 = 0x30303233; // version > this → +0x10
     private const uint NUVER_GE_0025 = 0x30303235; // version >= this → +0x10
+    private const uint NUVER_GE_0030 = 0x30303330; // version >= "0030" → +0x20 (FF2 ver "0036")
 
     // G1MG section type values (low 16 bits of the combined type+version uint).
     // The full section header u32 = (version<<16)|type — we mask to compare only the type.
@@ -398,7 +399,7 @@ public static class G1mReader
         }
 
         var (clothInfo, lodGroupCount) = mgSecData >= 0
-            ? ParseMeshGroupClothIds(data, mgSecData, mgSecEnd, g1mgVersion)
+            ? ParseMeshGroupClothIds(data, mgSecData, mgSecEnd, g1mgVersion, rawSubs)
             : (new Dictionary<int, (int clothId, int extId, int lodGroup)>(), 0);
         r.LodGroupCount = lodGroupCount;
 
@@ -603,12 +604,17 @@ public static class G1mReader
     //
     // Reads Section 9 (MeshGroups) and returns:
     //   map: submeshIndex → (clothId, extId, lodGroup)
-    //   return groupCount = unique LOD level count (maxLodLevel+1)
+    //   lodGroup count (for LOD dropdown)
     //
     // clothId values: 0=rigid, 1=NUNO cloth, 2=physics cloth.
-    // lodGroup = LOD level from group header pos+0 (u32); multiple groups can share the same level.
+    //
+    // Two LOD strategies (chosen after a full collection pass):
+    //   Strategy 1 — Group lod field (MUA3 style): any group header has lodLevel > 0.
+    //                lodGroup = group header's lod u32.
+    //   Strategy 2 — Name-based (DOA6 style): all lod=0 but mesh names repeat.
+    //                lodGroup = occurrence index of that name (0=first/highest, 1=second, …).
     private static (Dictionary<int, (int clothId, int extId, int lodGroup)>, int groupCount) ParseMeshGroupClothIds(
-        byte[] data, int start, int end, uint version)
+        byte[] data, int start, int end, uint version, List<RawSubmesh> rawSubs)
     {
         var result = new Dictionary<int, (int, int, int)>();
         if (start + 4 > end) return (result, 0);
@@ -617,6 +623,13 @@ public static class G1mReader
         int pos = start + 4;
         int maxLodLevel = -1;
 
+        // Per-smIdx entries for result population and Strategy 1.
+        var rawEntries = new List<(int smIdx, int clothId, int extId, int lodLevel,
+                                   uint n0, uint n1, uint n2, uint n3, bool isMulti)>();
+        // Per-mesh-entry records for Strategy 2 LOD detection.
+        // One record per mesh entry in Section 9, holding ALL smIdxs for that entry.
+        var rawMeshEntries = new List<(int clothId, int extId, uint n0, uint n1, uint n2, uint n3, List<int> smIdxs)>();
+
         for (int g = 0; g < groupCount; g++)
         {
             int sm1, sm2, lodLevel;
@@ -624,7 +637,7 @@ public static class G1mReader
             if (version > MGVER_GT_0400)        // DOA6: 36-byte group header
             {
                 if (pos + 20 > end) break;
-                lodLevel = (int)ReadU32(data, pos + 0);  // LOD level field (from RDB Explorer)
+                lodLevel = (int)ReadU32(data, pos + 0);
                 sm1 = (int)ReadU32(data, pos + 12);
                 sm2 = (int)ReadU32(data, pos + 16);
                 pos += 36;
@@ -653,29 +666,155 @@ public static class G1mReader
             {
                 if (pos + 28 > end) break;
                 // Mesh entry: name[16] + clothId(u16) + unk(u16) + externalId(u32) + idxCount(u32)
+                uint n0      = ReadU32(data, pos +  0);
+                uint n1      = ReadU32(data, pos +  4);
+                uint n2      = ReadU32(data, pos +  8);
+                uint n3      = ReadU32(data, pos + 12);
                 int clothId  = ReadU16(data, pos + 16);
                 int extId    = (int)ReadU32(data, pos + 20);
                 int idxCount = (int)ReadU32(data, pos + 24);
                 pos += 28;
 
+                bool isMulti = idxCount > 1;
+                var entrySmIdxs = new List<int>(Math.Max(idxCount, 1));
                 if (idxCount > 0)
                 {
                     for (int i = 0; i < idxCount && pos + 4 <= end; i++, pos += 4)
                     {
                         int smIdx = (int)ReadU32(data, pos);
-                        result.TryAdd(smIdx, (clothId, extId, lodLevel));
+                        rawEntries.Add((smIdx, clothId, extId, lodLevel, n0, n1, n2, n3, isMulti));
+                        entrySmIdxs.Add(smIdx);
                     }
                 }
                 else
                 {
                     if (pos + 4 <= end) pos += 4;  // skip dummy u32
                 }
+                rawMeshEntries.Add((clothId, extId, n0, n1, n2, n3, entrySmIdxs));
             }
         }
 
-        // LodGroupCount = unique LOD level count (maxLodLevel+1 assumes 0-based contiguous levels)
-        int uniqueLodCount = maxLodLevel >= 0 ? maxLodLevel + 1 : (groupCount > 0 ? 1 : 0);
-        return (result, uniqueLodCount);
+        // Strategy 1: group lod field is used (MUA3 style)
+        if (maxLodLevel > 0)
+        {
+            foreach (var (smIdx, clothId, extId, lodLevel, _, _, _, _, _) in rawEntries)
+                result.TryAdd(smIdx, (clothId, extId, lodLevel));
+            return (result, maxLodLevel + 1);
+        }
+
+        // Strategy 2: strict LOD detection (DOA6 style).
+        //
+        // Groups by name at MESH-ENTRY level (not per-smIdx) so that multi-submesh entries
+        // (idxCount>1 where all smIdxs share the same bmi) are treated as a single LOD slot.
+        //
+        // A "LOD chain" exists when a mesh name appears N≥2 times (N entries) and:
+        //   1. No entry has mixed bmis within its smIdxs (a single uniform bmi per entry)
+        //   2. All entries have clothId=0 (not cloth/physics)
+        //   3. All N entries in the group have DISTINCT bmi values (one palette per LOD level)
+        //   4. ALL name groups share the same count N (consistent LOD depth)
+        //   5. ALL name groups share the SAME SET of bmi values
+        //
+        // LOD rank 0 = entry with the most total vertices (highest quality).
+        // Singleton names with bmi outside the LOD set → billboard group (rank N).
+
+        // Build smIdx → boneMapIdx from Section 8
+        var smBmi = new Dictionary<int, int>(rawSubs.Count);
+        for (int i = 0; i < rawSubs.Count; i++)
+            smBmi[i] = rawSubs[i].BoneMapIndex;
+
+        // Group rawMeshEntries by name, computing per-entry representative bmi.
+        // isMixed = true when smIdxs in one entry have different bmi values.
+        var nameGroups = new Dictionary<(uint, uint, uint, uint),
+            List<(int entryBmi, int clothId, bool isMixed, List<int> smIdxs)>>();
+        foreach (var (clothId, extId, n0, n1, n2, n3, smIdxs) in rawMeshEntries)
+        {
+            if (smIdxs.Count == 0) continue;
+            int firstBmi = smBmi.GetValueOrDefault(smIdxs[0], -1);
+            bool isMixed = smIdxs.Skip(1).Any(idx => smBmi.GetValueOrDefault(idx, -1) != firstBmi);
+            int entryBmi = isMixed ? -1 : firstBmi;
+            var key = (n0, n1, n2, n3);
+            if (!nameGroups.TryGetValue(key, out var list))
+                nameGroups[key] = list = [];
+            list.Add((entryBmi, clothId, isMixed, smIdxs));
+        }
+
+        // Identify duplicate-name groups (≥2 mesh entries with the same name)
+        var dupGroups = nameGroups.Where(kv => kv.Value.Count >= 2).ToList();
+
+        bool isLodChain = false;
+        HashSet<int>? lodBmiSet = null;
+
+        if (dupGroups.Count > 0)
+        {
+            // Check 1 & 2: no mixed-bmi entries, all cloth=0
+            bool clean = dupGroups.All(kv =>
+                kv.Value.All(e => !e.isMixed && e.clothId == 0));
+
+            if (clean)
+            {
+                // Check 3: within each group, all entry bmi values must be distinct
+                bool distinctBmi = dupGroups.All(kv =>
+                    kv.Value.Select(e => e.entryBmi).Distinct().Count() == kv.Value.Count);
+
+                // Check 4: all groups have the same count N
+                int firstCount = dupGroups[0].Value.Count;
+                bool sameCount = dupGroups.All(kv => kv.Value.Count == firstCount);
+
+                if (distinctBmi && sameCount)
+                {
+                    // Check 5: all groups share the same bmi set
+                    var firstBmis = dupGroups[0].Value.Select(e => e.entryBmi).ToHashSet();
+                    bool sameBmis = dupGroups.All(kv =>
+                        kv.Value.Select(e => e.entryBmi).ToHashSet().SetEquals(firstBmis));
+
+                    if (sameBmis)
+                    {
+                        isLodChain = true;
+                        lodBmiSet  = firstBmis;
+                    }
+                }
+            }
+        }
+
+        if (!isLodChain)
+        {
+            // No LOD structure — single group, no dropdown
+            foreach (var (smIdx, clothId, extId, _, _, _, _, _, _) in rawEntries)
+                result.TryAdd(smIdx, (clothId, extId, 0));
+            return (result, groupCount > 0 ? 1 : 0);
+        }
+
+        // Assign LOD ranks: order by TOTAL VERTEX COUNT descending so rank 0 = highest quality.
+        var bmiVertexSum = new Dictionary<int, long>();
+        foreach (int bmi in lodBmiSet!)
+            bmiVertexSum[bmi] = 0;
+        for (int i = 0; i < rawSubs.Count; i++)
+        {
+            int bmi = smBmi.GetValueOrDefault(i, -1);
+            if (bmiVertexSum.ContainsKey(bmi))
+                bmiVertexSum[bmi] += rawSubs[i].NumVertices;
+        }
+
+        var bmiToRank = new Dictionary<int, int>();
+        int lodRank = 0;
+        foreach (int bmi in lodBmiSet!.OrderByDescending(b => bmiVertexSum.GetValueOrDefault(b, 0L)))
+            bmiToRank[bmi] = lodRank++;
+        int billboardRank = lodRank; // singletons with bmi outside the LOD set
+
+        foreach (var (smIdx, clothId, extId, _, _, _, _, _, _) in rawEntries)
+        {
+            int bmi = smBmi.GetValueOrDefault(smIdx, -1);
+            int lod = bmiToRank.TryGetValue(bmi, out int r) ? r : billboardRank;
+            result.TryAdd(smIdx, (clothId, extId, lod));
+        }
+
+        // LodGroupCount = N + 1 if any billboard exists, else N
+        bool hasBillboard = rawEntries.Any(e =>
+        {
+            int bmi = smBmi.GetValueOrDefault(e.smIdx, -1);
+            return !bmiToRank.ContainsKey(bmi);
+        });
+        return (result, hasBillboard ? billboardRank + 1 : billboardRank);
     }
 
     // ── Build submesh geometry ────────────────────────────────────────────────
@@ -960,6 +1099,7 @@ public static class G1mReader
                     int dataOff = entryStart + 24 + 0x3C;
                     if (outerVersion > NUVER_GT_0023) dataOff += 0x10;
                     if (outerVersion >= NUVER_GE_0025) dataOff += 0x10;
+                    if (outerVersion >= NUVER_GE_0030) dataOff += 0x20;
 
                     if (cpCount == 0 || cpCount > 1024 || dataOff + (int)cpCount * 16 > data.Length)
                     {
@@ -990,6 +1130,7 @@ public static class G1mReader
                     int nextBase = entryStart + 24 + 0x3C;
                     if (outerVersion > NUVER_GT_0023) nextBase += 0x10;
                     if (outerVersion >= NUVER_GE_0025) nextBase += 0x10;
+                    if (outerVersion >= NUVER_GE_0030) nextBase += 0x20;
                     ep = nextBase + (int)(cpCount * 16 + cpCount * 24 + 48 * unkSecs + 4 * (skip1 + skip2 + skip3));
                 }
             }

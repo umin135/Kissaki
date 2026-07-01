@@ -237,22 +237,9 @@ public static class MetadataExtractor
         return JsonSerializer.Serialize(doc, s_opts);
     }
 
-    // KidsObjDb: _DOK0000 header
-    private static string ExtractKidsObjDb(byte[] raw)
-    {
-        bool valid = raw.Length >= 12 &&
-            raw[0] == '_' && raw[1] == 'D' && raw[2] == 'O' && raw[3] == 'K';
-
-        var doc = new
-        {
-            format     = "KidsObjDb (DOK)",
-            magic      = valid ? "_DOK0000" : BytesToHex(raw, 0, Math.Min(8, raw.Length)),
-            fileSize   = raw.Length,
-            headerSize = valid ? (int)ReadU32(raw, 8) : 0,
-            note       = "Contains G1M→G1T texture slot mapping chain.",
-        };
-        return JsonSerializer.Serialize(doc, s_opts);
-    }
+    // KidsObjDb: full IDOK/RDOK record decode via KidsObjDbDecoder
+    private static string ExtractKidsObjDb(byte[] raw) =>
+        KidsObjDbDecoder.ToJson(raw);
 
     // G1N bitmap font header
     private static string ExtractG1n(byte[] raw)

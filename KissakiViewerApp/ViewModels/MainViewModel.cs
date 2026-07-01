@@ -205,7 +205,9 @@ public sealed partial class MainViewModel : ObservableObject
         BuildTypeFilters();
         AppLogger.Info($"에셋 로드 완료: {Assets.Count:N0}개");
 
-        FilteredAssets = new ObservableCollection<AssetItemViewModel>(batch!);
+        // Share the same collection as the initial filtered view (no filter is active yet).
+        // ApplyFilterAsync will replace FilteredAssets with a new OC when a filter is applied.
+        FilteredAssets = Assets;
         StatusText     = $"{batch!.Count:N0}개 에셋";
 
         IsLoading    = false;
