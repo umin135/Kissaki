@@ -493,9 +493,31 @@
                                              MajorDistance="50"
                                              Fill="#FF606060"/>
                     <ModelVisual3D x:Name="AxesRoot"/>
-                    <ModelVisual3D x:Name="BoneRoot"/>
                     <ModelVisual3D x:Name="SceneRoot"/>
                 </helix:HelixViewport3D>
+
+                <!-- Bone X-ray overlay: own depth buffer → bones always in front of mesh -->
+                <Viewport3D x:Name="BoneOverlayVP"
+                            IsHitTestVisible="False"
+                            Panel.ZIndex="1">
+                    <Viewport3D.Style>
+                        <Style TargetType="Viewport3D">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                             Value="{x:Static vm:PreviewMode.Model}">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Viewport3D.Style>
+                    <ModelVisual3D>
+                        <ModelVisual3D.Content>
+                            <AmbientLight Color="White"/>
+                        </ModelVisual3D.Content>
+                    </ModelVisual3D>
+                    <ModelVisual3D x:Name="BoneRoot"/>
+                </Viewport3D>
 
 <!-- Axis gizmo overlay (bottom-right) -->
                 <Canvas x:Name="GizmoCanvas"

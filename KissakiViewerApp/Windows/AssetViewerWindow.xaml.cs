@@ -81,6 +81,8 @@ public partial class AssetViewerWindow : Window
             // Hide cursor during right-click rotation (ShowCameraTarget=False is set in XAML)
             if (Viewport3D.CameraController != null)
                 Viewport3D.CameraController.RotateCursor = Cursors.None;
+            // Share camera with bone overlay viewport so they always stay in sync
+            BoneOverlayVP.Camera = Viewport3D.Camera;
         };
         Unloaded += (_, _) => CompositionTarget.Rendering -= OnRenderGizmo;
     }
@@ -89,6 +91,14 @@ public partial class AssetViewerWindow : Window
 
     private void OnRenderGizmo(object? sender, EventArgs e)
     {
+        // Keep bone overlay camera in sync every frame.
+        // HelixViewport3D may replace its Camera object when loading a new model, so a
+        // one-time assignment in Loaded is not enough.  Prefer the inner Viewport's camera
+        // (the one actually used for rendering); fall back to the outer DP value.
+        var liveCam = Viewport3D.Viewport?.Camera ?? Viewport3D.Camera;
+        if (liveCam != null && BoneOverlayVP.Camera != liveCam)
+            BoneOverlayVP.Camera = liveCam;
+
         if (Viewport3D.Camera is not ProjectionCamera cam) return;
         if (cam.LookDirection != _prevLookDir || cam.Position != _prevCamPos)
         {
@@ -499,34 +509,87 @@ public partial class AssetViewerWindow : Window
         BoneRoot.Children.Clear();
         if (!showBones || model == null || model.Bones.Length == 0) return;
 
-        // Bone connection lines
-        var linePoints = new Point3DCollection();
-        foreach (var bone in model.Bones)
+        // NunoCpStartIndex is set by AppendNunoBones to the total skeleton count (internal+external).
+        // Fall back to InternalBoneCount, then to full length (no CPs).
+        int skelCount = model.NunoCpStartIndex > 0 ? model.NunoCpStartIndex
+                      : model.InternalBoneCount  > 0 ? model.InternalBoneCount
+                      : model.Bones.Length;
+
+        var nunoParents2 = model.NunoParentBoneIndices;
+        AppLogger.Info($"[BONE_OVERLAY] skelCount={skelCount} NunoCpStart={model.NunoCpStartIndex} InternalBoneCount={model.InternalBoneCount} totalBones={model.Bones.Length} cpCount={model.Bones.Length - skelCount} nunoParents=[{string.Join(",", nunoParents2)}]");
+        // Log nunoParent bone positions
+        foreach (int bi in nunoParents2)
+            if (bi >= 0 && bi < model.Bones.Length)
+                AppLogger.Info($"[BONE_OVERLAY] nunoParentBone[{bi}] worldPos=({model.Bones[bi].WorldPosition.X:F2},{model.Bones[bi].WorldPosition.Y:F2},{model.Bones[bi].WorldPosition.Z:F2})");
+        // Log first CP bone positions
+        for (int _ci = skelCount; _ci < Math.Min(skelCount + 5, model.Bones.Length); _ci++)
+            AppLogger.Info($"[BONE_OVERLAY] CP bone[{_ci}] worldPos=({model.Bones[_ci].WorldPosition.X:F2},{model.Bones[_ci].WorldPosition.Y:F2},{model.Bones[_ci].WorldPosition.Z:F2}) parent={model.Bones[_ci].ParentIndex}");
+
+        // Reject bones with extreme world positions — these cause "spike" lines in the overlay.
+        const float kMaxPos = 2000f;
+        static bool IsValid(System.Numerics.Vector3 p)
+            => MathF.Abs(p.X) < kMaxPos && MathF.Abs(p.Y) < kMaxPos && MathF.Abs(p.Z) < kMaxPos;
+
+        var nunoParents = nunoParents2;
+
+        // ── Skeleton lines (white) — skeleton-bone → skeleton-bone only ───────
+        var skelLines = new Point3DCollection();
+        for (int i = 0; i < skelCount; i++)
         {
-            if (bone.ParentIndex >= 0 && bone.ParentIndex < model.Bones.Length)
+            var bone = model.Bones[i];
+            int pi = bone.ParentIndex;
+            if (pi >= 0 && pi < skelCount
+                && IsValid(model.Bones[pi].WorldPosition) && IsValid(bone.WorldPosition))
             {
-                linePoints.Add(ToWpf(model.Bones[bone.ParentIndex].WorldPosition));
-                linePoints.Add(ToWpf(bone.WorldPosition));
+                skelLines.Add(ToWpf(model.Bones[pi].WorldPosition));
+                skelLines.Add(ToWpf(bone.WorldPosition));
             }
         }
-        if (linePoints.Count > 0)
-            BoneRoot.Children.Add(new LinesVisual3D
-            {
-                Points    = linePoints,
-                Color     = Colors.White,
-                Thickness = 1.0,
-            });
+        if (skelLines.Count > 0)
+            BoneRoot.Children.Add(new LinesVisual3D { Points = skelLines, Color = Colors.White, Thickness = 1.0 });
 
-        var jointPoints = new Point3DCollection(model.Bones.Length);
-        foreach (var bone in model.Bones)
-            jointPoints.Add(ToWpf(bone.WorldPosition));
-        if (jointPoints.Count > 0)
-            BoneRoot.Children.Add(new PointsVisual3D
+        // ── Skeleton joint dots: normal (white) vs NUNO parent (orange) ───────
+        var skelPts       = new Point3DCollection();
+        var nunoParentPts = new Point3DCollection();
+        for (int i = 0; i < skelCount; i++)
+        {
+            var p = model.Bones[i].WorldPosition;
+            if (!IsValid(p)) continue;
+            if (nunoParents.Contains(i)) nunoParentPts.Add(ToWpf(p));
+            else                         skelPts.Add(ToWpf(p));
+        }
+        if (skelPts.Count > 0)
+            BoneRoot.Children.Add(new PointsVisual3D { Points = skelPts,       Color = Colors.White,  Size = 4 });
+        if (nunoParentPts.Count > 0)
+            BoneRoot.Children.Add(new PointsVisual3D { Points = nunoParentPts, Color = Colors.Orange, Size = 7 });
+
+        // ── NUNO CP bones (cyan): chain lines + dots ──────────────────────────
+        if (skelCount < model.Bones.Length)
+        {
+            var cpLines = new Point3DCollection();
+            for (int i = skelCount; i < model.Bones.Length; i++)
             {
-                Points = jointPoints,
-                Color  = Colors.White,
-                Size   = 5,
-            });
+                var bone = model.Bones[i];
+                int pi = bone.ParentIndex;
+                if (pi >= skelCount && pi < model.Bones.Length
+                    && IsValid(model.Bones[pi].WorldPosition) && IsValid(bone.WorldPosition))
+                {
+                    cpLines.Add(ToWpf(model.Bones[pi].WorldPosition));
+                    cpLines.Add(ToWpf(bone.WorldPosition));
+                }
+            }
+            if (cpLines.Count > 0)
+                BoneRoot.Children.Add(new LinesVisual3D { Points = cpLines, Color = Colors.Cyan, Thickness = 1.0 });
+
+            var cpPts = new Point3DCollection();
+            for (int i = skelCount; i < model.Bones.Length; i++)
+            {
+                var p = model.Bones[i].WorldPosition;
+                if (IsValid(p)) cpPts.Add(ToWpf(p));
+            }
+            if (cpPts.Count > 0)
+                BoneRoot.Children.Add(new PointsVisual3D { Points = cpPts, Color = Colors.Cyan, Size = 4 });
+        }
     }
 
     // ── Skybox ────────────────────────────────────────────────────────────────
@@ -860,6 +923,15 @@ public partial class AssetViewerWindow : Window
             var pts = new Point3DCollection(sm.Positions.Length);
             foreach (var p in sm.Positions) pts.Add(ToWpf(p));
             mesh.Positions = pts;
+            if (sm.Positions.Length > 0)
+            {
+                var p0   = sm.Positions[0];
+                float minX = sm.Positions.Min(p => p.X), maxX = sm.Positions.Max(p => p.X);
+                float minY = sm.Positions.Min(p => p.Y), maxY = sm.Positions.Max(p => p.Y);
+                float minZ = sm.Positions.Min(p => p.Z), maxZ = sm.Positions.Max(p => p.Z);
+                int zeroVerts = sm.Positions.Count(p => Math.Abs(p.X) < 0.01f && Math.Abs(p.Y) < 0.01f && Math.Abs(p.Z) < 0.01f);
+                AppLogger.Info($"[3D_POS] SM[{smIdx}] cloth={sm.ClothId} verts={sm.Positions.Length} zero={zeroVerts} X=[{minX:F1},{maxX:F1}] Y=[{minY:F1},{maxY:F1}] Z=[{minZ:F1},{maxZ:F1}]");
+            }
 
             var idxColl = new Int32Collection(sm.Indices.Length);
             foreach (var idx in sm.Indices) idxColl.Add(idx);
@@ -909,6 +981,8 @@ public partial class AssetViewerWindow : Window
         // Outline meshes are built lazily in SetShellOutlineVisible on first submesh selection —
         // pre-building all outlines up-front caused 10-30 s UI freezes on models with 100+ submeshes.
         var tmpBounds  = allMeshes.Bounds;
+        AppLogger.Info($"[3D] allMeshes.Children.Count={allMeshes.Children.Count} opaque={pendingOpaque.Count} alpha={pendingAlpha.Count}");
+        AppLogger.Info($"[3D] tmpBounds: IsEmpty={tmpBounds.IsEmpty} X={tmpBounds.X:F2} Y={tmpBounds.Y:F2} Z={tmpBounds.Z:F2} SizeX={tmpBounds.SizeX:F2} SizeY={tmpBounds.SizeY:F2} SizeZ={tmpBounds.SizeZ:F2}");
         double maxDim0 = tmpBounds.IsEmpty ? 1.0
             : Math.Max(Math.Max(tmpBounds.SizeX, tmpBounds.SizeY), tmpBounds.SizeZ);
         _shellScale = maxDim0 * 0.0025;
@@ -948,7 +1022,7 @@ public partial class AssetViewerWindow : Window
                 bounds.Z + bounds.SizeZ / 2);
 
             double dist = maxDim * 2.0;
-            Viewport3D.Camera = new PerspectiveCamera
+            var cam = new PerspectiveCamera
             {
                 Position          = new Point3D(center.X, center.Y - dist, center.Z + maxDim * 0.5),
                 LookDirection     = new Vector3D(0, dist, -maxDim * 0.5),
@@ -957,6 +1031,8 @@ public partial class AssetViewerWindow : Window
                 NearPlaneDistance = 0.1,
                 FarPlaneDistance  = 20000,
             };
+            AppLogger.Info($"[3D] Camera: pos=({cam.Position.X:F2},{cam.Position.Y:F2},{cam.Position.Z:F2}) look=({cam.LookDirection.X:F2},{cam.LookDirection.Y:F2},{cam.LookDirection.Z:F2}) maxDim={maxDim:F2}");
+            Viewport3D.Camera = cam;
         }
 
         DrawGizmo();

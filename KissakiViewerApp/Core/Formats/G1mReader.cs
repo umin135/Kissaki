@@ -5,8 +5,9 @@ namespace KissakiViewer.Core.Formats;
 
 // ── Data model ────────────────────────────────────────────────────────────────
 
-// One NUNO1 cloth entry: parent bone index + local-space control points.
-// Cloth vertices blend across these CPs (transformed to world space via the parent bone).
+// One NUNO cloth entry: parent bone index + control points.
+// NUNO1 (DOA6): CPs are in local/bone space → transformed via parent bone (IsWorldSpace=false).
+// NUNO4 (FF2):  CPs are already in world space → used directly (IsWorldSpace=true).
 public sealed class NunoEntry
 {
     public int       ParentBoneId  { get; set; }
@@ -15,6 +16,8 @@ public sealed class NunoEntry
     // -1 (== 0xFFFFFFFF as signed) = root CP → parents the skeleton bone.
     // >= 0 = parents another CP at that index within this entry.
     public int[]     CpParents     { get; set; } = [];
+    // NUNO4 (FF2): CPs are stored in world space; skip bone transform in ApplyNunoTransform.
+    public bool      IsWorldSpace  { get; set; }
 }
 
 public sealed class G1mBone
@@ -76,6 +79,14 @@ public sealed class G1mData
     public List<uint[]> PhysicsPalettes { get; } = new();
     // Number of MeshGroups (Section 0x10009) groups; 0=no section, 1=single group (no real LOD), 2+=multiple LOD levels
     public int LodGroupCount { get; set; }
+    // Index into Bones[] where NUNO control-point bones start (set by AppendNunoBones; 0 = not set).
+    // Bones[0..NunoCpStartIndex-1] = skeleton, Bones[NunoCpStartIndex..] = NUNO CPs.
+    public int NunoCpStartIndex { get; set; }
+    // NunoEntries index where NUNO5 entries begin (= count of NUNO1+NUNO4 entries; 0 = no NUNO5 section).
+    // Used by ApplyNunoTransform to remap extId >= 20000 → NunoEntries[PreNuno5Count + extId%20000].
+    public int PreNuno5Count { get; set; }
+    // Skeleton bone indices that serve as NUNO cloth entry parents (highlighted in overlay).
+    public HashSet<int> NunoParentBoneIndices { get; } = [];
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────────
@@ -90,8 +101,10 @@ public static class G1mReader
     private const uint SIG_G1MM = 0x47314D4D; // "G1MM"
     private const uint SIG_NUNO = 0x4E554E4F; // "NUNO"
 
-    // Inner section magic for NUNO1 entries
-    private const uint NUNO_SEC_NUNO1 = 0x00030004;
+    // Inner section magic constants for NUNO sub-sections
+    private const uint NUNO_SEC_NUNO1 = 0x00030001; // DOA6 / v0029 format
+    private const uint NUNO_SEC_NUNO4 = 0x00030004; // FF2  / v0036 format
+    private const uint NUNO_SEC_NUNO5 = 0x00030005; // FF2  / v0036 bone-chain cloth (432B hdr + bc×44B)
 
     // G1M outer version thresholds for NUNO dataOffset (from RDB Explorer ParseNuno1Entry).
     // The version read from NUNO_CHUNK+4 is the G1M file version as an ASCII u32 (e.g. "0039").
@@ -222,10 +235,27 @@ public static class G1mReader
             AppLogger.Info($"[G1MS] Merged external: internal={N} external={externalBones.Length} total={result.Bones.Length}");
         }
 
+        AppLogger.Info($"[G1M] bones={result.Bones.Length} nunoEntries={result.NunoEntries.Length} pendingCloth={pendingCloth.Count} pendingRigid={pendingRigid.Count}");
         ComputeWorldMatrices(result.Bones);
-        AppendNunoBones(result);
+        if (result.Bones.Length > 0)
+        {
+            var b0 = result.Bones[0];
+            AppLogger.Info($"[G1M] bone[0] worldPos=({b0.WorldPosition.X:F3},{b0.WorldPosition.Y:F3},{b0.WorldPosition.Z:F3}) worldQuat=({b0.WorldQuaternion.X:F4},{b0.WorldQuaternion.Y:F4},{b0.WorldQuaternion.Z:F4},{b0.WorldQuaternion.W:F4})");
+        }
         if (pendingRigid.Count > 0) ApplyRigidSkinning(result, pendingRigid);
+        if (result.NunoEntries.Length > 0) AppendNunoBones(result);
         if (pendingCloth.Count > 0) ApplyNunoTransform(result, pendingCloth);
+        // Log first position of first non-empty submesh after transforms
+        for (int _si = 0; _si < result.Submeshes.Length; _si++)
+        {
+            var _sm = result.Submeshes[_si];
+            if (_sm.Positions.Length > 0 && _sm.Positions[0] != System.Numerics.Vector3.Zero)
+            {
+                var _p = _sm.Positions[0];
+                AppLogger.Info($"[G1M] SM[{_si}] cloth={_sm.ClothId} pos[0]=({_p.X:F3},{_p.Y:F3},{_p.Z:F3})");
+                break;
+            }
+        }
         return result;
     }
 
@@ -277,20 +307,31 @@ public static class G1mReader
             if (o + 0x30 > data.Length) break;
 
             float sx = ReadF32(data, o + 0x00), sy = ReadF32(data, o + 0x04), sz = ReadF32(data, o + 0x08);
-            int parent = ReadI32(data, o + 0x0C);   // stored as int32; -1 (0xFFFFFFFF) = root
+            int rawParent = ReadI32(data, o + 0x0C);  // global bone ID; -1/0xFFFFFFFF = root
             float rx = ReadF32(data, o + 0x10), ry = ReadF32(data, o + 0x14),
                   rz = ReadF32(data, o + 0x18), rw = ReadF32(data, o + 0x1C);
             float px = ReadF32(data, o + 0x20), py = ReadF32(data, o + 0x24), pz = ReadF32(data, o + 0x28);
 
+            // rawParent is already a LOCAL bone array index (not a global ID).
+            // BoneIdList is used only for NUNO parentBoneId resolution, not for skeleton parent chains.
+            int parent = rawParent < 0 ? -1 : rawParent;
+
             bones[i] = new G1mBone
             {
-                ParentIndex   = parent < 0 ? -1 : parent,
+                ParentIndex   = parent,
                 LocalPosition = new Vector3(px, py, pz),
                 LocalRotation = new Quaternion(rx, ry, rz, rw),
                 LocalScale    = new Vector3(sx, sy, sz),
             };
         }
         r.Bones = bones;
+
+        // Diagnostic: dump converted parent + local position for first 20 bones
+        for (int _i = 0; _i < Math.Min(20, bones.Length); _i++)
+        {
+            var _b = bones[_i];
+            AppLogger.Info($"[G1MS_BONE] bone[{_i}] parent={_b.ParentIndex} localPos=({_b.LocalPosition.X:F2},{_b.LocalPosition.Y:F2},{_b.LocalPosition.Z:F2})");
+        }
     }
 
     // Reads G1MS bone data without modifying r. Returns raw parent u32 values for post-merge fix-up.
@@ -944,6 +985,11 @@ public static class G1mReader
                 int i4Of   = i4Sem?.Offset   ?? 0;
                 int ndOf   = ndSem?.Offset    ?? 0;
 
+                {
+                    var semList = string.Join(",", layout.Semantics.Select(s => $"T{s.Type}L{s.Layer}DT{s.DataType:X}@{s.Offset}"));
+                    AppLogger.Info($"[CLOTH_SEM] SM[{result.Count}] verts={numVerts} hasComW2={cW2Sem != null} ndDt={ndDt:X} sems=[{semList}]");
+                }
+
                 for (int vi = 0; vi < numVerts; vi++)
                 {
                     cpW1Arr[vi] = ReadVec4(cpW1D, vStart+vi, cpW1S, cpW1Of, cpW1Dt);
@@ -971,10 +1017,12 @@ public static class G1mReader
                     LodGroup      = lodGroup,
                 });
 
-                int nunoIdx = extId >= 20000 ? extId % 20000 : extId;
+                // Store raw extId — remapped to nunoIdx in ApplyNunoTransform once NUNO section is parsed.
+                // extId < 10000 → NUNO1 entry index; 10000–19999 → NUNO4 local index;
+                // extId >= 20000 → NUNO5 entry (PreNuno5Count + extId%20000).
                 pendingCloth.Add(new PendingCloth
                 {
-                    NunoEntryIndex = nunoIdx,
+                    NunoEntryIndex = extId,
                     SubmeshIndex   = submeshIdx,
                     CpWeights1     = cpW1Arr,
                     CpWeights2     = cpW2Arr,
@@ -1081,30 +1129,25 @@ public static class G1mReader
 
             if (secMagic == NUNO_SEC_NUNO1)
             {
+                // ── DOA6 / v0029 NUNO entry format ───────────────────────────
                 for (int j = 0; j < entryCount; j++)
                 {
-                    if (ep + 24 > secEnd || ep + 24 > data.Length) break;
+                    if (ep < 0 || ep + 28 > secEnd || ep + 28 > data.Length) break;
                     int  entryStart = ep;
-                    uint parentId   = ReadU32(data, ep);
+                    int  parentId   = ReadI32(data, ep);
                     uint cpCount    = ReadU32(data, ep + 4);
                     uint unkSecs    = ReadU32(data, ep + 8);
                     uint skip1      = ReadU32(data, ep + 12);
                     uint skip2      = ReadU32(data, ep + 16);
                     uint skip3      = ReadU32(data, ep + 20);
 
-                    // dataOffset — per ProjectG1M NUNO.h NUNO1 constructor:
-                    //   offset += 24 + 0x3C
-                    //   if version > "0023": offset += 0x10
-                    //   if version >= "0025": offset += 0x10
                     int dataOff = entryStart + 24 + 0x3C;
                     if (outerVersion > NUVER_GT_0023) dataOff += 0x10;
                     if (outerVersion >= NUVER_GE_0025) dataOff += 0x10;
-                    if (outerVersion >= NUVER_GE_0030) dataOff += 0x20;
+                    int advance = (dataOff - entryStart) + (int)(cpCount * 16 + cpCount * 24 + 48 * unkSecs + 4 * (skip1 + skip2 + skip3));
 
-                    if (cpCount == 0 || cpCount > 1024 || dataOff + (int)cpCount * 16 > data.Length)
-                    {
-                        ep = secEnd; break;  // bad entry — skip remainder of section
-                    }
+                    if (cpCount == 0 || cpCount > 1024 || advance <= 0 || dataOff + (int)cpCount * 16 > data.Length)
+                    { ep = secEnd; break; }
 
                     var cps = new Vector4[cpCount];
                     for (int k = 0; k < cpCount; k++)
@@ -1113,25 +1156,158 @@ public static class G1mReader
                         cps[k] = new Vector4(ReadF32(data, o), ReadF32(data, o+4), ReadF32(data, o+8), ReadF32(data, o+12));
                     }
 
-                    // Influence data follows immediately after CPs (NunInfluence = 24 bytes each).
-                    // P3 is the 3rd int field (byte offset 8) = per-CP parent index within entry.
-                    // 0xFFFFFFFF (-1 signed) = root CP → parents the NUNO skeleton bone.
+                    // NunInfluence = 24 bytes per CP; parent index at byte +8.
                     int inflBase = dataOff + (int)cpCount * 16;
                     var cpParents = new int[cpCount];
                     for (int k = 0; k < cpCount; k++)
                     {
-                        int io = inflBase + k * 24 + 8;  // P3 at byte 8 within 24-byte NunInfluence
+                        int io = inflBase + k * 24 + 8;
                         cpParents[k] = (io + 4 <= data.Length) ? ReadI32(data, io) : -1;
                     }
 
-                    entries.Add(new NunoEntry { ParentBoneId = (int)parentId, ControlPoints = cps, CpParents = cpParents });
+                    entries.Add(new NunoEntry { ParentBoneId = parentId, ControlPoints = cps, CpParents = cpParents });
+                    ep = entryStart + advance;
+                }
+            }
+            else if (secMagic == NUNO_SEC_NUNO4)
+            {
+                if (outerVersion >= NUVER_GE_0030)
+                {
+                    // ── FF2 / v0036 NUNO4: alternating type-A / type-B entries ──
+                    //   type-A (f6≠0): header=208, cpWorldOff = entryStart + 196 + unkSecs*40
+                    //   type-B (f6=0): header=184, cpWorldOff = entryStart + 184 + unkSecs*40
+                    //   advance = header + cp*36 + unk*64 + (typeA?skip1:parentId)*4
+                    //   Stride = 28B per CP: float4 (x,y,z,w=1.0) + 12B extra
+                    for (int j = 0; j < entryCount; j++)
+                    {
+                        if (ep < 0 || ep + 28 > secEnd || ep + 28 > data.Length) break;
+                        int  entryStart = ep;
+                        int  parentId   = ReadI32(data, ep);
+                        uint cpCount    = ReadU32(data, ep + 4);
+                        uint unkSecs    = ReadU32(data, ep + 8);
+                        uint skip1      = ReadU32(data, ep + 12);
+                        uint f6         = ReadU32(data, ep + 24);
 
-                    // Advance: re-derive dataOff so ep calculation is self-contained
-                    int nextBase = entryStart + 24 + 0x3C;
-                    if (outerVersion > NUVER_GT_0023) nextBase += 0x10;
-                    if (outerVersion >= NUVER_GE_0025) nextBase += 0x10;
-                    if (outerVersion >= NUVER_GE_0030) nextBase += 0x20;
-                    ep = nextBase + (int)(cpCount * 16 + cpCount * 24 + 48 * unkSecs + 4 * (skip1 + skip2 + skip3));
+                        bool typeA   = (f6 != 0);
+                        int  advance = typeA
+                            ? 208 + (int)cpCount * 36 + (int)unkSecs * 64 + (int)skip1 * 4
+                            : 184 + (int)cpCount * 36 + (int)unkSecs * 64 + parentId  * 4;
+                        int cpWorldOff = entryStart + (typeA ? 196 : 184) + (int)unkSecs * 40;
+
+                        if (cpCount == 0 || cpCount > 1024 || unkSecs > 255 || advance <= 0
+                            || cpWorldOff + (int)cpCount * 28 > entryStart + advance
+                            || cpWorldOff + (int)cpCount * 28 > data.Length)
+                        { ep = secEnd; break; }
+
+                        var cps       = new Vector4[cpCount];
+                        var cpParents = new int[cpCount];
+                        for (int k = 0; k < cpCount; k++)
+                        {
+                            int o = cpWorldOff + k * 28;
+                            cps[k]       = new Vector4(ReadF32(data, o), ReadF32(data, o+4), ReadF32(data, o+8), ReadF32(data, o+12));
+                            cpParents[k] = (o + 28 <= data.Length) ? ReadI32(data, o + 24) : -1;
+                        }
+
+                        entries.Add(new NunoEntry { ParentBoneId = parentId, ControlPoints = cps, CpParents = cpParents, IsWorldSpace = true });
+                        ep = entryStart + advance;
+                    }
+                }
+                else
+                {
+                    // ── DOA6LR / v0029 NUNO4: compact format ──
+                    //   Fixed header = 64B, unkSec = 60B each, CP stride = 28B, tail = cpCount*8B
+                    //   advance = 64 + unkSecs*60 + cpCount*36
+                    //   cpWorldOff = entryStart + 64 + unkSecs*60
+                    //   Positions are in WORLD SPACE (no bone transform needed).
+                    for (int j = 0; j < entryCount; j++)
+                    {
+                        if (ep < 0 || ep + 28 > secEnd || ep + 28 > data.Length) break;
+                        int  entryStart = ep;
+                        int  parentId   = ReadI32(data, ep);
+                        uint cpCount    = ReadU32(data, ep + 4);
+                        uint unkSecs    = ReadU32(data, ep + 8);
+
+                        int advance    = 64 + (int)unkSecs * 60 + (int)cpCount * 36;
+                        int cpWorldOff = entryStart + 64 + (int)unkSecs * 60;
+
+                        if (cpCount == 0 || cpCount > 1024 || unkSecs > 255 || advance <= 0
+                            || cpWorldOff + (int)cpCount * 28 > entryStart + advance
+                            || cpWorldOff + (int)cpCount * 28 > data.Length)
+                        { ep = secEnd; break; }
+
+                        var cps       = new Vector4[cpCount];
+                        var cpParents = new int[cpCount];
+                        for (int k = 0; k < cpCount; k++)
+                        {
+                            int o = cpWorldOff + k * 28;
+                            cps[k]       = new Vector4(ReadF32(data, o), ReadF32(data, o+4), ReadF32(data, o+8), ReadF32(data, o+12));
+                            cpParents[k] = parentId;
+                        }
+
+                        entries.Add(new NunoEntry { ParentBoneId = parentId, ControlPoints = cps, CpParents = cpParents, IsWorldSpace = true });
+                        ep = entryStart + advance;
+                    }
+                }
+            }
+            else if (secMagic == NUNO_SEC_NUNO5)
+            {
+                // ── FF2 / v0036 NUNO5 bone-chain cloth format ────────────────────────────
+                // Each entry: 432-byte (0x1B0) fixed header + boneCount×44 bone records + variable constraint data.
+                // Header key fields:
+                //   +0x04: parent global bone ID  +0x28: bone count
+                //   +0x0C: always 2               +0x58: always 344  ← used as scan anchor
+                // Bone record (44 bytes): float3 xyz (world pos) + float + float2 + int parentInChain + int seq + int(-1) + int + int(1)
+                // Constraint data size formula is complex and version-dependent → use scan-based advance.
+
+                if (r.PreNuno5Count == 0) r.PreNuno5Count = entries.Count;
+                int ep5 = pos + 12;  // first entry starts immediately after 12-byte section header
+
+                for (int found = 0; found < entryCount && ep5 >= 0 && ep5 + 0x1B0 + 44 <= secEnd; )
+                {
+                    // Validate this position as a NUNO5 entry header via constant-field checks.
+                    // +0x0C == 2, +0x2C == 3, +0x58 == 344: three independent constants → very low false-positive rate.
+                    if (ep5 + 0x5C > secEnd ||
+                        ReadU32(data, ep5 + 0x0C) != 2 ||
+                        ReadU32(data, ep5 + 0x2C) != 3 ||
+                        ReadU32(data, ep5 + 0x58) != 344)
+                    {
+                        ep5 = ScanForNuno5Header(data, ep5 + 4, secEnd);
+                        continue;
+                    }
+
+                    uint n5Parent    = ReadU32(data, ep5 + 0x04);
+                    uint n5BoneCount = ReadU32(data, ep5 + 0x28);
+
+                    if (n5BoneCount == 0 || n5BoneCount > 500 || n5Parent >= 4096)
+                    {
+                        ep5 = ScanForNuno5Header(data, ep5 + 4, secEnd);
+                        continue;
+                    }
+
+                    int boneStart5 = ep5 + 0x1B0;
+                    if (boneStart5 + (int)n5BoneCount * 44 > secEnd) break;
+
+                    var n5Cps       = new Vector4[n5BoneCount];
+                    var n5CpParents = new int[n5BoneCount];
+                    for (int k = 0; k < n5BoneCount; k++)
+                    {
+                        int o = boneStart5 + k * 44;
+                        n5Cps[k]       = new Vector4(ReadF32(data, o), ReadF32(data, o + 4), ReadF32(data, o + 8), 1f);
+                        n5CpParents[k] = ReadI32(data, o + 24);  // parent_in_chain; -1 = chain root
+                    }
+
+                    AppLogger.Info($"[NUNO5] entry[{found}] parent={n5Parent} bc={n5BoneCount} pos=0x{ep5:X} cp0=({n5Cps[0].X:F3},{n5Cps[0].Y:F3},{n5Cps[0].Z:F3})");
+                    entries.Add(new NunoEntry
+                    {
+                        ParentBoneId  = (int)n5Parent,
+                        ControlPoints = n5Cps,
+                        CpParents     = n5CpParents,
+                        IsWorldSpace  = false,  // NUNO5 positions are in parent skeleton bone LOCAL space
+                    });
+                    found++;
+
+                    // Advance: scan forward from after bone data for the next valid NUNO5 header
+                    ep5 = ScanForNuno5Header(data, boneStart5 + (int)n5BoneCount * 44, secEnd);
                 }
             }
 
@@ -1139,6 +1315,29 @@ public static class G1mReader
         }
 
         r.NunoEntries = [.. entries];
+    }
+
+    // Scans forward at 4-byte alignment for the next NUNO5 entry header.
+    // Returns -1 if not found within [searchStart, secEnd).
+    private static int ScanForNuno5Header(byte[] data, int searchStart, int secEnd)
+    {
+        // Three independent constants must match simultaneously → very low false-positive rate.
+        //   +0x0C == 2   (always 2 in observed entries)
+        //   +0x2C == 3   (always 3 in observed entries)
+        //   +0x58 == 344 (always 344 in observed entries)
+        for (int p = searchStart; p + 0x5C <= secEnd; p += 4)
+        {
+            if (ReadU32(data, p + 0x0C) == 2 &&
+                ReadU32(data, p + 0x2C) == 3 &&
+                ReadU32(data, p + 0x58) == 344)
+            {
+                uint bc = ReadU32(data, p + 0x28);
+                uint pg = ReadU32(data, p + 0x04);
+                if (bc > 0 && bc <= 500 && pg < 4096)
+                    return p;
+            }
+        }
+        return -1;
     }
 
     // ── NUNO cloth vertex transform ───────────────────────────────────────────
@@ -1151,21 +1350,73 @@ public static class G1mReader
     //   comWeights2 (COLOR_1) optional → b = U-tangent (fallback: b = a)
     //   d = normalize(cross(normalize(b), normalize(c))) = cloth surface normal
     //   finalPos = a + d * depth
-    private static Vector3 GetClothPoint(BlendIdx4 idx, Vector4 weights, Vector3[] wCPs)
+    // maxLocal: maximum valid local index (exclusive) within this entry; guards against OOR indices
+    private static Vector3 GetClothPoint(BlendIdx4 idx, Vector4 weights, Vector3[] wCPs, int offset = 0, int maxLocal = int.MaxValue)
     {
         var res = Vector3.Zero;
-        if (weights.X != 0 && idx.I0 < wCPs.Length) res += wCPs[idx.I0] * weights.X;
-        if (weights.Y != 0 && idx.I1 < wCPs.Length) res += wCPs[idx.I1] * weights.Y;
-        if (weights.Z != 0 && idx.I2 < wCPs.Length) res += wCPs[idx.I2] * weights.Z;
-        if (weights.W != 0 && idx.I3 < wCPs.Length) res += wCPs[idx.I3] * weights.W;
+        int i0 = offset + idx.I0, i1 = offset + idx.I1, i2 = offset + idx.I2, i3 = offset + idx.I3;
+        int lim = (long)offset + maxLocal > wCPs.Length ? wCPs.Length : offset + maxLocal;
+        if (weights.X != 0 && i0 >= offset && i0 < lim) res += wCPs[i0] * weights.X;
+        if (weights.Y != 0 && i1 >= offset && i1 < lim) res += wCPs[i1] * weights.Y;
+        if (weights.Z != 0 && i2 >= offset && i2 < lim) res += wCPs[i2] * weights.Z;
+        if (weights.W != 0 && i3 >= offset && i3 < lim) res += wCPs[i3] * weights.W;
         return res;
     }
 
     private static void ApplyNunoTransform(G1mData r, List<PendingCloth> pending)
     {
+        // NUNO4 (FF2, IsWorldSpace=true): CP indices in vertex data are GLOBAL — they address the
+        //   concatenated CP array (globalWCPs) directly. cpOffset=0; do NOT add per-entry offset.
+        // NUNO1 (DOA6, IsWorldSpace=false): indices are per-entry local; wCPs built per submesh.
+        bool isNuno4 = r.NunoEntries.Length > 0 && r.NunoEntries[0].IsWorldSpace;
+        Vector3[]? globalWCPs = null;
+        int[]? globalEntryStarts = null;
+        if (isNuno4)
+        {
+            int total = 0;
+            foreach (var e in r.NunoEntries) total += e.ControlPoints.Length;
+            globalWCPs = new Vector3[total];
+            globalEntryStarts = new int[r.NunoEntries.Length];
+            int gi = 0;
+            for (int ei = 0; ei < r.NunoEntries.Length; ei++)
+            {
+                var e = r.NunoEntries[ei];
+                globalEntryStarts[ei] = gi;
+                float minCpX = float.MaxValue, maxCpX = float.MinValue;
+                float minCpZ = float.MaxValue, maxCpZ = float.MinValue;
+
+                // NUNO5 entries are stored in parent-bone local space (IsWorldSpace=false).
+                // Resolve parent bone once per entry so they land in world space in globalWCPs.
+                Vector3    eBonePos  = Vector3.Zero;
+                Quaternion eBoneQuat = Quaternion.Identity;
+                if (!e.IsWorldSpace)
+                {
+                    int pid = ResolveNunoParentBoneId(r, e.ParentBoneId);
+                    if (pid >= 0) { eBonePos = r.Bones[pid].WorldPosition; eBoneQuat = r.Bones[pid].WorldQuaternion; }
+                }
+
+                foreach (var cp in e.ControlPoints)
+                {
+                    var wcp = e.IsWorldSpace
+                        ? new Vector3(cp.X, cp.Y, cp.Z)
+                        : eBonePos + Vector3.Transform(new Vector3(cp.X, cp.Y, cp.Z), eBoneQuat);
+                    globalWCPs[gi++] = wcp;
+                    if (wcp.X < minCpX) minCpX = wcp.X; if (wcp.X > maxCpX) maxCpX = wcp.X;
+                    if (wcp.Z < minCpZ) minCpZ = wcp.Z; if (wcp.Z > maxCpZ) maxCpZ = wcp.Z;
+                }
+                float minCpY = e.ControlPoints.Length > 0 ? globalWCPs.Skip(globalEntryStarts[ei]).Take(e.ControlPoints.Length).Min(v => v.Y) : 0;
+                float maxCpY = e.ControlPoints.Length > 0 ? globalWCPs.Skip(globalEntryStarts[ei]).Take(e.ControlPoints.Length).Max(v => v.Y) : 0;
+                var first = globalEntryStarts[ei] < gi ? globalWCPs[globalEntryStarts[ei]] : default;
+                AppLogger.Info($"[NUNO4_CP] entry[{ei}] globalStart={globalEntryStarts[ei]} cpCount={e.ControlPoints.Length} isWS={e.IsWorldSpace} X=[{minCpX:F1},{maxCpX:F1}] Y=[{minCpY:F1},{maxCpY:F1}] Z=[{minCpZ:F1},{maxCpZ:F1}] CP[0]=({first.X:F2},{first.Y:F2},{first.Z:F2})");
+            }
+        }
+
         foreach (var pc in pending)
         {
-            int nunoIdx = pc.NunoEntryIndex;
+            int rawExtId = pc.NunoEntryIndex;
+            int nunoIdx = rawExtId >= 20000 ? r.PreNuno5Count + (rawExtId % 20000)
+                        : rawExtId >= 10000 ? rawExtId % 10000
+                        : rawExtId;
             if (nunoIdx < 0 || nunoIdx >= r.NunoEntries.Length) continue;
             var entry = r.NunoEntries[nunoIdx];
 
@@ -1182,77 +1433,176 @@ public static class G1mReader
             // Per-vertex RIVET detection (matches RDB Explorer exactly):
             //   BITANGENT channel = zero  →  bone-attached (RIVET): bonePos + boneRot * localPos
             //   BITANGENT channel ≠ zero  →  cloth simulation: full basis-deformation formula
-            // Using submesh-level detection was wrong; a single submesh can mix both types.
-            var wCPs = new Vector3[entry.ControlPoints.Length];
-            for (int k = 0; k < wCPs.Length; k++)
+            Vector3[] wCPs;
+            int cpOffset;
+            int cpMaxLocal; // exclusive upper bound of local CP indices valid for this entry
+            if (globalWCPs != null)
             {
-                var cp = entry.ControlPoints[k];
-                wCPs[k] = bonePos + Vector3.Transform(new Vector3(cp.X, cp.Y, cp.Z), boneQuat);
+                wCPs = globalWCPs;
+                if (entry.IsWorldSpace)
+                {
+                    // NUNO4 (isWS=true): CP indices in vertex data are GLOBAL — address globalWCPs directly.
+                    cpOffset   = 0;
+                    cpMaxLocal = globalWCPs.Length;
+                }
+                else
+                {
+                    // NUNO5 (isWS=false): CP indices in vertex data are LOCAL to the entry.
+                    // Must add the entry's global start offset so indices map to correct CPs.
+                    cpOffset   = globalEntryStarts![nunoIdx];
+                    cpMaxLocal = entry.ControlPoints.Length;
+                }
+            }
+            else
+            {
+                // NUNO1: per-entry bone-local → world transform
+                wCPs = new Vector3[entry.ControlPoints.Length];
+                for (int k = 0; k < wCPs.Length; k++)
+                {
+                    var cp = entry.ControlPoints[k];
+                    wCPs[k] = bonePos + Vector3.Transform(new Vector3(cp.X, cp.Y, cp.Z), boneQuat);
+                }
+                cpOffset   = 0;
+                cpMaxLocal = wCPs.Length;
             }
 
-            bool hasI2  = pc.Indices2.Length == n;
-            bool hasI3  = pc.Indices3.Length == n;
-            bool hasI4  = pc.Indices4.Length == n;
-            bool hasCW2 = pc.ComWeights2.Length == n;
+            bool hasI2    = pc.Indices2.Length == n;
+            bool hasI3    = pc.Indices3.Length == n;
+            bool hasI4    = pc.Indices4.Length == n;
+            bool hasCW2   = pc.ComWeights2.Length == n;
+            bool hasComW1 = pc.ComWeights1.Length == n;
+            bool hasNd    = pc.NormalDepth.Length == n;
 
+            // Per-vertex rivet vs. cloth detection (matches RDB Explorer):
+            //   cpW2 (BITANGENT) == zero-vector  →  RIVET: bone-attached, cpW1.XYZ = local pos
+            //   cpW2 (BITANGENT) != zero-vector  →  CLOTH: bilinear blend over NUNO CPs
             for (int vi = 0; vi < n; vi++)
             {
                 var cpW1 = pc.CpWeights1[vi];
                 var cpW2 = pc.CpWeights2.Length > vi ? pc.CpWeights2[vi] : Vector4.Zero;
-                var cW1  = pc.ComWeights1[vi];
-                var cW2  = hasCW2 ? pc.ComWeights2[vi] : Vector4.Zero;
-                var i1   = pc.Indices1.Length > vi ? pc.Indices1[vi] : default;
-                var i2   = hasI2 ? pc.Indices2[vi] : default;
-                var i3   = hasI3 ? pc.Indices3[vi] : default;
-                var i4   = hasI4 ? pc.Indices4[vi] : default;
-                var nd   = pc.NormalDepth.Length > vi ? pc.NormalDepth[vi] : Vector4.Zero;
+                var nd   = hasNd ? pc.NormalDepth[vi] : Vector4.Zero;
+                bool isCloth = cpW2.X != 0f || cpW2.Y != 0f || cpW2.Z != 0f || cpW2.W != 0f;
 
-                // Per-vertex RIVET: BITANGENT = zero → bone-attached vertex (RDB Explorer criterion)
-                if (cpW2.LengthSquared() < 1e-6f)
+                if (!isCloth)
                 {
+                    // Rivet: cpW1.XYZ is local position relative to NUNO parent bone
                     sub.Positions[vi] = bonePos + Vector3.Transform(new Vector3(cpW1.X, cpW1.Y, cpW1.Z), boneQuat);
-                    var wn2 = Vector3.Transform(new Vector3(nd.X, nd.Y, nd.Z), boneQuat);
-                    sub.Normals[vi] = wn2.LengthSquared() > 1e-8f ? Vector3.Normalize(wn2) : Vector3.UnitY;
-                    continue;
+                    var wn = Vector3.Transform(new Vector3(nd.X, nd.Y, nd.Z), boneQuat);
+                    sub.Normals[vi] = wn.LengthSquared() > 1e-8f ? Vector3.Normalize(wn) : Vector3.UnitY;
                 }
-
-                var u1 = GetClothPoint(i1, cpW1, wCPs);
-                var u2 = GetClothPoint(i2, cpW1, wCPs);
-                var u3 = GetClothPoint(i3, cpW1, wCPs);
-                var u4 = GetClothPoint(i4, cpW1, wCPs);
-
-                var v1 = GetClothPoint(i1, cpW2, wCPs);
-                var v2 = GetClothPoint(i2, cpW2, wCPs);
-                var v3 = GetClothPoint(i3, cpW2, wCPs);
-                var v4 = GetClothPoint(i4, cpW2, wCPs);
-
-                var a = u1*cW1.X + u2*cW1.Y + u3*cW1.Z + u4*cW1.W;
-                var c = v1*cW1.X + v2*cW1.Y + v3*cW1.Z + v4*cW1.W;
-
-                // b = Σ(u_k * cW2_k). If cW2=0, b=0 → d=0 → finalPos=a (no spike).
-                // Do NOT fall back to b=a; a×c would be enormous and cause spikes.
-                Vector3 b = hasCW2
-                    ? (u1*cW2.X + u2*cW2.Y + u3*cW2.Z + u4*cW2.W)
-                    : Vector3.Zero;
-
-                // ProjectG1M Source.cpp line 1780: d = b.Cross(c), NOT normalized.
-                var d = Vector3.Cross(b, c);
-
-                if (d.LengthSquared() < 1e-12f)
+                else
                 {
-                    sub.Positions[vi] = a;
-                    sub.Normals[vi]   = Vector3.UnitY;
-                    continue;
+                    // Cloth: bilinear-patch basis deformation (ProjectG1M formula)
+                    var idx1  = pc.Indices1[vi];
+                    var idx2  = hasI2 ? pc.Indices2[vi] : default;
+                    var idx3  = hasI3 ? pc.Indices3[vi] : default;
+                    var idx4  = hasI4 ? pc.Indices4[vi] : default;
+                    var comW1 = hasComW1 ? pc.ComWeights1[vi] : Vector4.Zero;
+                    var comW2 = hasCW2   ? pc.ComWeights2[vi] : Vector4.Zero;
+
+                    // U-direction: blend CPs using cpW1 weights for each row
+                    var u1 = GetClothPoint(idx1, cpW1, wCPs, cpOffset, cpMaxLocal);
+                    var u2 = hasI2 ? GetClothPoint(idx2, cpW1, wCPs, cpOffset, cpMaxLocal) : Vector3.Zero;
+                    var u3 = hasI3 ? GetClothPoint(idx3, cpW1, wCPs, cpOffset, cpMaxLocal) : Vector3.Zero;
+                    var u4 = hasI4 ? GetClothPoint(idx4, cpW1, wCPs, cpOffset, cpMaxLocal) : Vector3.Zero;
+
+                    // V-direction: blend CPs using cpW2 weights for each row
+                    var v1 = GetClothPoint(idx1, cpW2, wCPs, cpOffset, cpMaxLocal);
+                    var v2 = hasI2 ? GetClothPoint(idx2, cpW2, wCPs, cpOffset, cpMaxLocal) : Vector3.Zero;
+                    var v3 = hasI3 ? GetClothPoint(idx3, cpW2, wCPs, cpOffset, cpMaxLocal) : Vector3.Zero;
+                    var v4 = hasI4 ? GetClothPoint(idx4, cpW2, wCPs, cpOffset, cpMaxLocal) : Vector3.Zero;
+
+                    // Surface position: weighted sum of U-direction row positions
+                    var a = u1 * comW1.X + u2 * comW1.Y + u3 * comW1.Z + u4 * comW1.W;
+
+                    // Tangent frame for normal/depth reconstruction (ProjectG1M: NO normalization of b or c)
+                    Vector3 b, c;
+                    Vector3 d;
+                    if (comW2.LengthSquared() > 1e-8f)
+                    {
+                        // comW2 (COLOR_1) present: b is a tangent vector along the row direction
+                        b = u1 * comW2.X + u2 * comW2.Y + u3 * comW2.Z + u4 * comW2.W;
+                        c = v1 * comW1.X + v2 * comW1.Y + v3 * comW1.Z + v4 * comW1.W;
+                        d = Vector3.Cross(b, c);
+                    }
+                    else if (!isNuno4)
+                    {
+                        // NUNO1 fallback: b = a (safe because bone-local positions are small)
+                        b = a;
+                        c = v1 * comW1.X + v2 * comW1.Y + v3 * comW1.Z + v4 * comW1.W;
+                        d = Vector3.Cross(b, c);
+                    }
+                    else
+                    {
+                        // NUNO4 world-space without COLOR_1: skip depth displacement.
+                        b = a;
+                        c = v1 * comW1.X + v2 * comW1.Y + v3 * comW1.Z + v4 * comW1.W;
+                        d = Vector3.Zero;
+                    }
+
+                    // NUNO4 world-space: normalize d before applying depth.
+                    // World-space CPs have large magnitude (~10-150 units), making Cross(b,c) huge.
+                    // depth is in cloth-surface-normal units, so d must be a unit vector.
+                    if (isNuno4)
+                    {
+                        float dSq = d.LengthSquared();
+                        d = dSq > 1e-12f ? d / MathF.Sqrt(dSq) : Vector3.Zero;
+                    }
+
+                    var finalPosTmp = a + d * nd.W;
+                    bool isSpikeVert = isNuno4 && (MathF.Abs(finalPosTmp.X) > 30f || MathF.Abs(finalPosTmp.Z) > 30f || finalPosTmp.Y > 165f);
+                    bool isNuno4Rivet = isNuno4 && !isCloth;
+                    if ((vi < 3 && pc.SubmeshIndex < 8) || isSpikeVert || (isNuno4Rivet && pc.SubmeshIndex < 8))
+                        AppLogger.Info($"[CLOTH_DBG] SM[{pc.SubmeshIndex}] v[{vi}] spike={isSpikeVert} nunoIdx={nunoIdx} cpOff={cpOffset} hasCW2={hasCW2} idx1=({cpOffset+idx1.I0},{cpOffset+idx1.I1},{cpOffset+idx1.I2},{cpOffset+idx1.I3}) idx2=({cpOffset+idx2.I0},{cpOffset+idx2.I1},{cpOffset+idx2.I2},{cpOffset+idx2.I3}) idx3=({cpOffset+idx3.I0},{cpOffset+idx3.I1},{cpOffset+idx3.I2},{cpOffset+idx3.I3}) idx4=({cpOffset+idx4.I0},{cpOffset+idx4.I1},{cpOffset+idx4.I2},{cpOffset+idx4.I3}) cpW1=({cpW1.X:F4},{cpW1.Y:F4},{cpW1.Z:F4},{cpW1.W:F4}) cpW2=({cpW2.X:F4},{cpW2.Y:F4},{cpW2.Z:F4},{cpW2.W:F4}) comW1=({comW1.X:F4},{comW1.Y:F4},{comW1.Z:F4},{comW1.W:F4}) comW2=({comW2.X:F4},{comW2.Y:F4},{comW2.Z:F4},{comW2.W:F4}) u1=({u1.X:F2},{u1.Y:F2},{u1.Z:F2}) a=({a.X:F2},{a.Y:F2},{a.Z:F2}) b=({b.X:F2},{b.Y:F2},{b.Z:F2}) c=({c.X:F4},{c.Y:F4},{c.Z:F4}) d=({d.X:F2},{d.Y:F2},{d.Z:F2}) dLen={d.Length():F2} depth={nd.W:F4} pos=({finalPosTmp.X:F2},{finalPosTmp.Y:F2},{finalPosTmp.Z:F2})");
+
+                    sub.Positions[vi] = finalPosTmp;
+
+                    // Build normalized basis for normal transform
+                    float bLen = b.Length(), cLen = c.Length(), dLen = d.Length();
+                    var bN = bLen > 1e-8f ? b / bLen : Vector3.UnitX;
+                    var cN = cLen > 1e-8f ? c / cLen : Vector3.UnitZ;
+                    var dN = dLen > 1e-8f ? d / dLen : Vector3.UnitY;
+                    var localNorm = new Vector3(nd.X, nd.Y, nd.Z);
+                    var worldNorm = bN * localNorm.Y + cN * localNorm.X + dN * localNorm.Z;
+                    float wnLen = worldNorm.Length();
+                    sub.Normals[vi] = wnLen > 1e-8f ? worldNorm / wnLen : Vector3.UnitY;
                 }
+            }
 
-                var finalPos = a + d * nd.W;
+            {
+                float maxP = sub.Positions.Take(n).Max(p => MathF.Max(MathF.Max(MathF.Abs(p.X), MathF.Abs(p.Y)), MathF.Abs(p.Z)));
+                int clothVerts = Enumerable.Range(0, n).Count(vi => {
+                    var w2 = pc.CpWeights2.Length > vi ? pc.CpWeights2[vi] : Vector4.Zero;
+                    return w2.X != 0f || w2.Y != 0f || w2.Z != 0f || w2.W != 0f;
+                });
+                AppLogger.Info($"[NUNO_DBG] SM[{pc.SubmeshIndex}] nunoIdx={nunoIdx} cpOff={cpOffset} maxAbsPos={maxP:F1} clothVerts={clothVerts}/{n}");
 
-                sub.Positions[vi] = finalPos;
-
-                // Source.cpp line 1783: normal = b*ny + c*nx + d*nz, then normalize.
-                var localNorm = new Vector3(nd.X, nd.Y, nd.Z);
-                var wNorm = b * localNorm.Y + c * localNorm.X + d * localNorm.Z;
-                sub.Normals[vi] = wNorm.LengthSquared() > 1e-6f ? Vector3.Normalize(wNorm) : Vector3.Normalize(d);
+                // Log the most extreme vertex to diagnose remaining spikes (threshold above NUNO4 normal Y≈160)
+                if (maxP > 500f)
+                {
+                    int maxVi = -1; float maxVal = 0f;
+                    for (int vi2 = 0; vi2 < n; vi2++)
+                    {
+                        var p = sub.Positions[vi2];
+                        float v = MathF.Max(MathF.Max(MathF.Abs(p.X), MathF.Abs(p.Y)), MathF.Abs(p.Z));
+                        if (v > maxVal) { maxVal = v; maxVi = vi2; }
+                    }
+                    if (maxVi >= 0)
+                    {
+                        var exIdx = pc.Indices1[maxVi];
+                        var exCW1 = pc.CpWeights1[maxVi];
+                        var exCW2 = pc.CpWeights2.Length > maxVi ? pc.CpWeights2[maxVi] : Vector4.Zero;
+                        var exCom = pc.ComWeights1.Length > maxVi ? pc.ComWeights1[maxVi] : Vector4.Zero;
+                        var exNd  = pc.NormalDepth.Length > maxVi ? pc.NormalDepth[maxVi] : Vector4.Zero;
+                        // Log raw global indices being accessed
+                        int gi0 = cpOffset + exIdx.I0, gi1 = cpOffset + exIdx.I1;
+                        int gi2 = cpOffset + exIdx.I2, gi3 = cpOffset + exIdx.I3;
+                        var gcp0 = gi0 < wCPs.Length ? wCPs[gi0] : Vector3.Zero;
+                        var gcp1 = gi1 < wCPs.Length ? wCPs[gi1] : Vector3.Zero;
+                        var pos = sub.Positions[maxVi];
+                        AppLogger.Info($"[SPIKE] SM[{pc.SubmeshIndex}] v[{maxVi}] pos=({pos.X:F1},{pos.Y:F1},{pos.Z:F1}) gIdx=({gi0},{gi1},{gi2},{gi3}) CP0=({gcp0.X:F2},{gcp0.Y:F2},{gcp0.Z:F2}) CP1=({gcp1.X:F2},{gcp1.Y:F2},{gcp1.Z:F2}) cpW1=({exCW1.X:F3},{exCW1.Y:F3},{exCW1.Z:F3},{exCW1.W:F3}) cpW2=({exCW2.X:F3},{exCW2.Y:F3},{exCW2.Z:F3},{exCW2.W:F3}) comW1=({exCom.X:F3},{exCom.Y:F3},{exCom.Z:F3},{exCom.W:F3}) depth={exNd.W:F4}");
+                    }
+                }
             }
 
         }
@@ -1320,6 +1670,17 @@ public static class G1mReader
             if (p.ClothId == 2 && p.BoneMapIndex >= 0 && p.BoneMapIndex < r.PhysicsPalettes.Count)
             {
                 uint[] physPal = r.PhysicsPalettes[p.BoneMapIndex];
+                // Diagnostic: log first vertex of first clothId=2 SM
+                if (p.RawPositions.Length > 0)
+                {
+                    int li0 = (int)Math.Round(p.BlendIndices[0].I0 / 3.0);
+                    uint gb0 = (uint)li0 < (uint)physPal.Length ? physPal[li0] : 0xFFFFFFFF;
+                    var rp0 = p.RawPositions[0];
+                    string boneInfo = gb0 < (uint)r.Bones.Length
+                        ? $"bonePos=({r.Bones[(int)gb0].WorldPosition.X:F1},{r.Bones[(int)gb0].WorldPosition.Y:F1},{r.Bones[(int)gb0].WorldPosition.Z:F1})"
+                        : $"gb0={gb0} OUT_OF_RANGE(boneCount={r.Bones.Length})";
+                    AppLogger.Info($"[G1M_C2] SM[{p.SubmeshIndex}] physPalLen={physPal.Length} li0={li0} gb0={gb0} rawPos0=({rp0.X:F1},{rp0.Y:F1},{rp0.Z:F1}) {boneInfo}");
+                }
                 for (int vi = 0; vi < p.RawPositions.Length; vi++)
                 {
                     int localIdx = (int)Math.Round(p.BlendIndices[vi].I0 / 3.0);
@@ -1508,7 +1869,11 @@ public static class G1mReader
         {
             DT_UBYTE4  => new BlendIdx4(data[o], data[o+1], data[o+2], data[o+3]),
             DT_USHORT4 => o + 8 <= data.Length
-                ? new BlendIdx4(ReadU16(data,o), ReadU16(data,o+2), ReadU16(data,o+4), ReadU16(data,o+6))
+                ? new BlendIdx4(
+                    (int)(ReadU16(data,o)   == 0xFFFF ? 0 : ReadU16(data,o)),
+                    (int)(ReadU16(data,o+2) == 0xFFFF ? 0 : ReadU16(data,o+2)),
+                    (int)(ReadU16(data,o+4) == 0xFFFF ? 0 : ReadU16(data,o+4)),
+                    (int)(ReadU16(data,o+6) == 0xFFFF ? 0 : ReadU16(data,o+6)))
                 : default,
             _ => default,
         };
@@ -1581,6 +1946,7 @@ public static class G1mReader
         if (r.NunoEntries.Length == 0 || r.Bones.Length == 0) return;
 
         int skelCount = r.Bones.Length;
+        r.NunoCpStartIndex = skelCount; // mark where skeleton ends and CP bones begin
         var newBones  = new List<G1mBone>(r.Bones);
 
         foreach (var entry in r.NunoEntries)
@@ -1590,16 +1956,28 @@ public static class G1mReader
             int boneId = ResolveNunoParentBoneId(r, entry.ParentBoneId);
             if (boneId < 0) continue;
 
+            r.NunoParentBoneIndices.Add(boneId); // track for bone overlay highlighting
+
             var parentBone = r.Bones[boneId];
             var bonePos    = parentBone.WorldPosition;
             var boneQuat   = parentBone.WorldQuaternion;
             int cpStartIdx = newBones.Count;  // index of first CP bone in this entry
 
+            var cp0 = entry.ControlPoints.Length > 0 ? entry.ControlPoints[0] : default;
+            var storedWorld = entry.IsWorldSpace
+                ? new Vector3(cp0.X, cp0.Y, cp0.Z)
+                : bonePos + Vector3.Transform(new Vector3(cp0.X, cp0.Y, cp0.Z), boneQuat);
+            AppLogger.Info($"[NUNO_BONE] entry parentId={entry.ParentBoneId} boneId={boneId} isWS={entry.IsWorldSpace} cpCount={entry.ControlPoints.Length} parentBoneWorldPos=({bonePos.X:F2},{bonePos.Y:F2},{bonePos.Z:F2}) CP[0]raw=({cp0.X:F3},{cp0.Y:F3},{cp0.Z:F3}) CP[0]storedWorld=({storedWorld.X:F2},{storedWorld.Y:F2},{storedWorld.Z:F2})");
+
+            bool isWorldSpace = entry.IsWorldSpace;
             for (int k = 0; k < entry.ControlPoints.Length; k++)
             {
                 var cp       = entry.ControlPoints[k];
                 var localPos = new Vector3(cp.X, cp.Y, cp.Z);
-                var worldPos = bonePos + Vector3.Transform(localPos, boneQuat);
+                // NUNO4 CPs are already world-space; NUNO1 CPs are bone-local.
+                var worldPos = isWorldSpace
+                    ? localPos
+                    : bonePos + Vector3.Transform(localPos, boneQuat);
 
                 // P3: per-CP parent within entry. -1 (0xFFFFFFFF) = root → parents skeleton bone.
                 int p3           = k < entry.CpParents.Length ? entry.CpParents[k] : -1;
@@ -1624,34 +2002,89 @@ public static class G1mReader
         {
             r.Bones = newBones.ToArray();
         }
+        AppLogger.Info($"[NUNO_APPEND] skelCount={skelCount} NunoCpStartIndex={r.NunoCpStartIndex} totalBones={r.Bones.Length} cpAdded={r.Bones.Length - skelCount} parentBoneIndices=[{string.Join(",", r.NunoParentBoneIndices)}]");
+        // Log first few CP bone positions to verify
+        for (int _i = skelCount; _i < Math.Min(skelCount + 3, r.Bones.Length); _i++)
+            AppLogger.Info($"[NUNO_APPEND] CP bone[{_i}] worldPos=({r.Bones[_i].WorldPosition.X:F2},{r.Bones[_i].WorldPosition.Y:F2},{r.Bones[_i].WorldPosition.Z:F2})");
     }
 
     private static void ComputeWorldMatrices(G1mBone[] bones)
     {
+        // Use DFS from each root to handle any parent ordering (parents may have index > child).
+        var state = new byte[bones.Length]; // 0=unvisited, 1=in-progress, 2=done
+        int outOfOrder = 0;
+        var oooSamples = new System.Text.StringBuilder();
         for (int i = 0; i < bones.Length; i++)
         {
-            var b = bones[i];
+            int pi = bones[i].ParentIndex;
+            if (pi > i && pi < bones.Length)
+            {
+                if (outOfOrder < 5) oooSamples.Append($" bone[{i}]→parent[{pi}]");
+                outOfOrder++;
+            }
+        }
+        if (outOfOrder > 0)
+            AppLogger.Info($"[BONE_ORDER] {outOfOrder} out-of-order parents (DFS fix applied): {oooSamples}");
+        else
+            AppLogger.Info($"[BONE_ORDER] all {bones.Length} parents in order");
+
+        for (int i = 0; i < bones.Length; i++)
+        {
+            int pi = bones[i].ParentIndex;
+            if (pi < 0 || pi >= bones.Length || pi == i)
+                ComputeWorldMatrix_DFS(bones, i, state);
+        }
+        // DFS may not visit all bones if orphaned — finish unvisited
+        for (int i = 0; i < bones.Length; i++)
+        {
+            if (state[i] == 0) ComputeWorldMatrix_DFS(bones, i, state);
+        }
+
+        // Diagnostic: log skeleton bones with WorldPosition near Y=0 (to identify foot/root bones)
+        int nearOriginCount = 0;
+        var nearOriginSb = new System.Text.StringBuilder();
+        for (int i = 0; i < bones.Length; i++)
+        {
+            float wy = bones[i].WorldPosition.Y;
+            if (MathF.Abs(wy) < 20f)
+            {
+                nearOriginCount++;
+                if (nearOriginCount <= 10)
+                    nearOriginSb.Append($" [{i}]Y={wy:F1}(p={bones[i].ParentIndex})");
+            }
+        }
+        AppLogger.Info($"[BONE_NEAR_ORIGIN] bones with |Y|<20: count={nearOriginCount}{nearOriginSb}");
+    }
+
+    private static void ComputeWorldMatrix_DFS(G1mBone[] bones, int i, byte[] state)
+    {
+        if (state[i] == 2) return;
+        if (state[i] == 1) { state[i] = 2; return; } // cycle guard
+        state[i] = 1;
+
+        var b = bones[i];
+        int pi = b.ParentIndex;
+        if (pi >= 0 && pi < bones.Length && pi != i)
+        {
+            if (state[pi] != 2) ComputeWorldMatrix_DFS(bones, pi, state);
+            var p = bones[pi];
             var local = Matrix4x4.CreateScale(b.LocalScale)
                       * Matrix4x4.CreateFromQuaternion(b.LocalRotation)
                       * Matrix4x4.CreateTranslation(b.LocalPosition);
-
-            if (b.ParentIndex >= 0 && b.ParentIndex < i)
-            {
-                var p = bones[b.ParentIndex];
-                b.WorldMatrix = local * p.WorldMatrix;
-                // Scale-free world transform (RDB Explorer ComputeBoneWorldTransforms):
-                //   worldPos[i] = worldPos[parent] + Transform(localPos, worldRot[parent])
-                //   worldRot[i] = Normalize(worldRot[parent] * localRot)
-                b.WorldPosition   = p.WorldPosition + Vector3.Transform(b.LocalPosition, p.WorldQuaternion);
-                b.WorldQuaternion = Quaternion.Normalize(p.WorldQuaternion * b.LocalRotation);
-            }
-            else
-            {
-                b.WorldMatrix     = local;
-                b.WorldPosition   = b.LocalPosition;
-                b.WorldQuaternion = b.LocalRotation;
-            }
+            b.WorldMatrix     = local * p.WorldMatrix;
+            b.WorldPosition   = p.WorldPosition + Vector3.Transform(b.LocalPosition, p.WorldQuaternion);
+            b.WorldQuaternion = Quaternion.Normalize(p.WorldQuaternion * b.LocalRotation);
         }
+        else
+        {
+            var local = Matrix4x4.CreateScale(b.LocalScale)
+                      * Matrix4x4.CreateFromQuaternion(b.LocalRotation)
+                      * Matrix4x4.CreateTranslation(b.LocalPosition);
+            b.WorldMatrix     = local;
+            b.WorldPosition   = b.LocalPosition;
+            b.WorldQuaternion = b.LocalRotation;
+        }
+        state[i] = 2;
     }
 
     // ── Primitives ────────────────────────────────────────────────────────────
