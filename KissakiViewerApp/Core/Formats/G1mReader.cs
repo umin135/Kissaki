@@ -8,6 +8,8 @@ namespace KissakiViewer.Core.Formats;
 // One NUNO cloth entry: parent bone index + control points.
 // NUNO1 (DOA6): CPs are in local/bone space → transformed via parent bone (IsWorldSpace=false).
 // NUNO4 (FF2):  CPs are already in world space → used directly (IsWorldSpace=true).
+// NUNO5 (FF2/Yumia): CPs are in parent-bone local space but vertex CP indices are GLOBAL
+//   across all NUNO5 entries (single concatenated array, not per-entry local). UseGlobalIndex=true.
 public sealed class NunoEntry
 {
     public int       ParentBoneId  { get; set; }
@@ -18,6 +20,9 @@ public sealed class NunoEntry
     public int[]     CpParents     { get; set; } = [];
     // NUNO4 (FF2): CPs are stored in world space; skip bone transform in ApplyNunoTransform.
     public bool      IsWorldSpace  { get; set; }
+    // NUNO5 (FF2/Yumia): vertex CP indices are GLOBAL across all NUNO5 entries (concatenated),
+    // not per-entry local like NUNO1. cpOffset must be 0 for these entries.
+    public bool      UseGlobalIndex { get; set; }
 }
 
 public sealed class G1mBone
@@ -1299,10 +1304,11 @@ public static class G1mReader
                     AppLogger.Info($"[NUNO5] entry[{found}] parent={n5Parent} bc={n5BoneCount} pos=0x{ep5:X} cp0=({n5Cps[0].X:F3},{n5Cps[0].Y:F3},{n5Cps[0].Z:F3})");
                     entries.Add(new NunoEntry
                     {
-                        ParentBoneId  = (int)n5Parent,
-                        ControlPoints = n5Cps,
-                        CpParents     = n5CpParents,
-                        IsWorldSpace  = false,  // NUNO5 positions are in parent skeleton bone LOCAL space
+                        ParentBoneId   = (int)n5Parent,
+                        ControlPoints  = n5Cps,
+                        CpParents      = n5CpParents,
+                        IsWorldSpace   = false,   // NUNO5 CPs are in parent skeleton bone LOCAL space
+                        UseGlobalIndex = true,    // but vertex CP indices are GLOBAL across all NUNO5 entries
                     });
                     found++;
 
@@ -1367,11 +1373,14 @@ public static class G1mReader
     {
         // NUNO4 (FF2, IsWorldSpace=true): CP indices in vertex data are GLOBAL — they address the
         //   concatenated CP array (globalWCPs) directly. cpOffset=0; do NOT add per-entry offset.
-        // NUNO1 (DOA6, IsWorldSpace=false): indices are per-entry local; wCPs built per submesh.
+        // NUNO5 (FF2/Yumia, UseGlobalIndex=true): same global indexing, but CPs are bone-local
+        //   and need bone transform applied; vertex indices still address globalWCPs from index 0.
+        // NUNO1 (DOA6, IsWorldSpace=false, UseGlobalIndex=false): indices are per-entry local; wCPs built per submesh.
         bool isNuno4 = r.NunoEntries.Length > 0 && r.NunoEntries[0].IsWorldSpace;
+        bool hasNuno5 = r.NunoEntries.Any(e => e.UseGlobalIndex);
         Vector3[]? globalWCPs = null;
         int[]? globalEntryStarts = null;
-        if (isNuno4)
+        if (isNuno4 || hasNuno5)
         {
             int total = 0;
             foreach (var e in r.NunoEntries) total += e.ControlPoints.Length;
@@ -1419,6 +1428,7 @@ public static class G1mReader
                         : rawExtId;
             if (nunoIdx < 0 || nunoIdx >= r.NunoEntries.Length) continue;
             var entry = r.NunoEntries[nunoIdx];
+            bool isGlobalCloth = isNuno4 || entry.UseGlobalIndex; // world-space CPs for this entry
 
             int boneId = ResolveNunoParentBoneId(r, entry.ParentBoneId);
             if (boneId < 0) continue;
@@ -1439,16 +1449,16 @@ public static class G1mReader
             if (globalWCPs != null)
             {
                 wCPs = globalWCPs;
-                if (entry.IsWorldSpace)
+                if (entry.IsWorldSpace || entry.UseGlobalIndex)
                 {
-                    // NUNO4 (isWS=true): CP indices in vertex data are GLOBAL — address globalWCPs directly.
+                    // NUNO4 (isWS=true) / NUNO5 (UseGlobalIndex=true):
+                    // CP indices in vertex data are GLOBAL — address globalWCPs directly from 0.
                     cpOffset   = 0;
                     cpMaxLocal = globalWCPs.Length;
                 }
                 else
                 {
-                    // NUNO5 (isWS=false): CP indices in vertex data are LOCAL to the entry.
-                    // Must add the entry's global start offset so indices map to correct CPs.
+                    // Mixed model with non-global NUNO entry: per-entry local indices + global start offset.
                     cpOffset   = globalEntryStarts![nunoIdx];
                     cpMaxLocal = entry.ControlPoints.Length;
                 }
@@ -1525,7 +1535,7 @@ public static class G1mReader
                         c = v1 * comW1.X + v2 * comW1.Y + v3 * comW1.Z + v4 * comW1.W;
                         d = Vector3.Cross(b, c);
                     }
-                    else if (!isNuno4)
+                    else if (!isGlobalCloth)
                     {
                         // NUNO1 fallback: b = a (safe because bone-local positions are small)
                         b = a;
@@ -1534,24 +1544,24 @@ public static class G1mReader
                     }
                     else
                     {
-                        // NUNO4 world-space without COLOR_1: skip depth displacement.
+                        // NUNO4/NUNO5 world-space without COLOR_1: skip depth displacement.
                         b = a;
                         c = v1 * comW1.X + v2 * comW1.Y + v3 * comW1.Z + v4 * comW1.W;
                         d = Vector3.Zero;
                     }
 
-                    // NUNO4 world-space: normalize d before applying depth.
+                    // World-space CPs (NUNO4/NUNO5 global): normalize d before applying depth.
                     // World-space CPs have large magnitude (~10-150 units), making Cross(b,c) huge.
                     // depth is in cloth-surface-normal units, so d must be a unit vector.
-                    if (isNuno4)
+                    if (isGlobalCloth)
                     {
                         float dSq = d.LengthSquared();
                         d = dSq > 1e-12f ? d / MathF.Sqrt(dSq) : Vector3.Zero;
                     }
 
                     var finalPosTmp = a + d * nd.W;
-                    bool isSpikeVert = isNuno4 && (MathF.Abs(finalPosTmp.X) > 30f || MathF.Abs(finalPosTmp.Z) > 30f || finalPosTmp.Y > 165f);
-                    bool isNuno4Rivet = isNuno4 && !isCloth;
+                    bool isSpikeVert = isGlobalCloth && (MathF.Abs(finalPosTmp.X) > 30f || MathF.Abs(finalPosTmp.Z) > 30f || finalPosTmp.Y > 165f);
+                    bool isNuno4Rivet = isGlobalCloth && !isCloth;
                     if ((vi < 3 && pc.SubmeshIndex < 8) || isSpikeVert || (isNuno4Rivet && pc.SubmeshIndex < 8))
                         AppLogger.Info($"[CLOTH_DBG] SM[{pc.SubmeshIndex}] v[{vi}] spike={isSpikeVert} nunoIdx={nunoIdx} cpOff={cpOffset} hasCW2={hasCW2} idx1=({cpOffset+idx1.I0},{cpOffset+idx1.I1},{cpOffset+idx1.I2},{cpOffset+idx1.I3}) idx2=({cpOffset+idx2.I0},{cpOffset+idx2.I1},{cpOffset+idx2.I2},{cpOffset+idx2.I3}) idx3=({cpOffset+idx3.I0},{cpOffset+idx3.I1},{cpOffset+idx3.I2},{cpOffset+idx3.I3}) idx4=({cpOffset+idx4.I0},{cpOffset+idx4.I1},{cpOffset+idx4.I2},{cpOffset+idx4.I3}) cpW1=({cpW1.X:F4},{cpW1.Y:F4},{cpW1.Z:F4},{cpW1.W:F4}) cpW2=({cpW2.X:F4},{cpW2.Y:F4},{cpW2.Z:F4},{cpW2.W:F4}) comW1=({comW1.X:F4},{comW1.Y:F4},{comW1.Z:F4},{comW1.W:F4}) comW2=({comW2.X:F4},{comW2.Y:F4},{comW2.Z:F4},{comW2.W:F4}) u1=({u1.X:F2},{u1.Y:F2},{u1.Z:F2}) a=({a.X:F2},{a.Y:F2},{a.Z:F2}) b=({b.X:F2},{b.Y:F2},{b.Z:F2}) c=({c.X:F4},{c.Y:F4},{c.Z:F4}) d=({d.X:F2},{d.Y:F2},{d.Z:F2}) dLen={d.Length():F2} depth={nd.W:F4} pos=({finalPosTmp.X:F2},{finalPosTmp.Y:F2},{finalPosTmp.Z:F2})");
 
