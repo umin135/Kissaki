@@ -13,14 +13,6 @@
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
   </PropertyGroup>
 
-  <!-- AssimpNet 4.1.0 custom loader searches the exe root, not runtimes/win-x64/native/ -->
-  <Target Name="CopyAssimpNativeDll" AfterTargets="Build">
-    <Copy SourceFiles="$(OutDir)runtimes\win-x64\native\assimp.dll"
-          DestinationFolder="$(OutDir)"
-          SkipUnchangedFiles="true"
-          Condition="Exists('$(OutDir)runtimes\win-x64\native\assimp.dll')"/>
-  </Target>
-
   <ItemGroup>
     <Content Include="Images\defaultHDR.hdr">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -33,8 +25,7 @@
   <ItemGroup>
     <PackageReference Include="AdonisUI" Version="1.17.1" />
     <PackageReference Include="AdonisUI.ClassicTheme" Version="1.17.1" />
-    <PackageReference Include="AssimpNet" Version="4.1.0" />
-    <PackageReference Include="BCnEncoder.Net" Version="2.1.1" />
+<PackageReference Include="BCnEncoder.Net" Version="2.1.1" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.5" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
     <PackageReference Include="Ookii.Dialogs.Wpf" Version="5.0.1" />

@@ -175,11 +175,6 @@
                                     <Setter.Value>
                                         <ContextMenu>
                                             <!-- PlacementTarget = ListViewItem; .Tag = MainViewModel; .DataContext = AssetItemViewModel -->
-                                            <MenuItem Header="Save Model (FBX)"
-                                                      Command="{Binding PlacementTarget.Tag.SaveModelCommand,
-                                                                RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                                      CommandParameter="{Binding PlacementTarget.DataContext,
-                                                                         RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                             <MenuItem Header="Export Raw"
                                                       Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
                                                                 RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
@@ -270,11 +265,6 @@
                                     <Setter Property="ContextMenu">
                                         <Setter.Value>
                                             <ContextMenu>
-                                                <MenuItem Header="Save Model (FBX)"
-                                                          Command="{Binding PlacementTarget.Tag.SaveModelCommand,
-                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                                          CommandParameter="{Binding PlacementTarget.DataContext,
-                                                                             RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                                 <MenuItem Header="Export Raw"
                                                           Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
                                                                     RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>

@@ -64,6 +64,10 @@ public static class KtidExtension
         [0x4638B72D] = ".rbg",        // River2BakedGeometry
         [0x60A5ABFF] = ".g1fr",       // G1FRAni
         [0x8725D306] = ".g1fpose",    // G1FPose
+        // ── Identified via probe (DOA6LR — previously unknown) ────────────────
+        [0xF20DE437] = ".effselect",  // eff_select table (249 files)
+        [0x133D2C3B] = ".unk_133d",   // KTID hash list inside G1M bundles
+        [0x757347E0] = ".unk_757347", // Unidentified (2 files only)
     };
 
     public static string Get(uint typeKtid) =>
@@ -85,6 +89,7 @@ public static class KtidExtension
         0x5C3E543C                                      => "Physics (.swg)",
         0xb097d41f                                      => "VFX (.xf1g)",
         0x17614af5 or 0x79c724c2 or 0xa8d88566          => "Mesh (.m1gk)",
+        0xF20DE437                                      => "Effects (.effselect)",
         _                                               => "Misc",
     };
 }

@@ -322,126 +322,56 @@ public sealed partial class MainViewModel : ObservableObject
         AppLogger.Info($"[NameDictionary] {names.Count}개 로드, {matched}개 적용");
     }
 
-    // ── Save Model (FBX) ─────────────────────────────────────────────────────
+    // ── G1M companion file discovery ─────────────────────────────────────────
 
-    [RelayCommand(CanExecute = nameof(CanSaveModel))]
-    private async Task SaveModelAsync(AssetItemViewModel? vm)
+    // TypeKtid values that are bundled alongside a G1M in the same fdata block group.
+    private static readonly HashSet<uint> s_g1mCompanionTypeKtids =
+    [
+        0x8e39aa37u, 0xBE144B78u, // .ktid
+        0xb340861au, 0x5153729bu, // .mtl
+        0x56efe45cu, 0xbbf9b49du, // .grp
+        0x133d2c3bu,              // unknown adjacent type observed in DOA6 bundles
+    ];
+
+    private static readonly HashSet<uint> s_g1mTypeKtids = [0x563bdef1u, 0xBEF563DDu];
+
+    /// <summary>
+    /// Finds companion files (KTID, MTL, GRP, …) for a G1M by scanning the same fdata container.
+    /// Collects all companion-typed assets whose fdata offset falls between the nearest preceding
+    /// G1M and this G1M — skipping over any non-companion intermediary types without stopping.
+    /// </summary>
+    private List<AssetItemViewModel> ResolveCompanionFiles(AssetItemViewModel vm)
     {
-        vm ??= SelectedAsset;
-        if (vm == null || _extractor == null) return;
+        var inSameFdata = _allAssetsByKtid.Values
+            .Where(a => a.Container == vm.Container)
+            .OrderBy(a => a.Record.FdataOffset)
+            .ToList();
 
-        string exportDir = Path.Combine(AppContext.BaseDirectory, "export");
-        string stem      = vm.RecoveredName is string rn ? Path.GetFileNameWithoutExtension(rn) : vm.KtidHex;
+        int g1mIdx = inSameFdata.FindIndex(a => a.Record.FileKtid == vm.Record.FileKtid);
+        if (g1mIdx < 0) return [];
 
-        StatusText = $"모델 내보내는 중... {stem}";
+        ulong g1mOffset = vm.Record.FdataOffset;
 
-        string? savedPath = null;
-        int     texCount  = 0;
-        string? err       = null;
-
-        var extractor = _extractor;
-        await Task.Run(() =>
+        // Lower bound: the previous G1M's offset (exclusive).
+        // Prevents picking up companions that belong to an earlier bundle.
+        ulong lowerBound = 0;
+        for (int i = g1mIdx - 1; i >= 0; i--)
         {
-            try
+            if (s_g1mTypeKtids.Contains(inSameFdata[i].Record.TypeKtid))
             {
-                Directory.CreateDirectory(exportDir);
-
-                // 1. Parse G1M
-                byte[]   raw   = extractor.ExtractToMemory(vm.Record, vm.Container);
-                G1mData? model = G1mReader.Read(raw);
-                if (model == null) { err = "G1M 파싱 실패"; return; }
-
-                // 2. Resolve associated G1T files
-                var g1tFiles = ResolveG1tFilesForModel(vm);
-                AppLogger.Info($"[SaveModel] G1T files resolved: {g1tFiles.Count}");
-
-                // 3. Determine how many texture slots live in one G1T file
-                int texPerFile = 1;
-                if (g1tFiles.Count > 0)
-                {
-                    try
-                    {
-                        var fi = g1tFiles[0];
-                        var firstInfo = G1tDecoder.Survey(extractor.ExtractToMemory(fi.Record, fi.Container));
-                        if (firstInfo.Version == "1600")
-                        {
-                            int rc = firstInfo.Textures.Count(t => t.FmtCode != 0);
-                            if (rc > 1) texPerFile = rc;
-                        }
-                    }
-                    catch { }
-                }
-
-                // 4. Collect which global G1T slots are needed
-                var neededSlots = model.MaterialTextures.Count > 0
-                    ? model.MaterialTextures.Select(x => x.G1tSlot).Distinct().ToList()
-                    : model.Submeshes.Select(s => s.MaterialIndex).Where(m => m >= 0).Distinct().ToList();
-
-                // 5. Group by G1T file index, extract and save PNGs
-                var matTexPaths = new Dictionary<int, string>(); // matIdx → relative .png name
-
-                foreach (var grp in neededSlots.GroupBy(s => s / texPerFile))
-                {
-                    int fileIdx = grp.Key;
-                    if (fileIdx >= g1tFiles.Count) continue;
-
-                    byte[] g1tRaw;
-                    try { g1tRaw = extractor.ExtractToMemory(g1tFiles[fileIdx].Record, g1tFiles[fileIdx].Container); }
-                    catch { continue; }
-                    if (g1tRaw.Length < 8 || g1tRaw[0] != 'G') continue;
-
-                    List<(int Slot, Image<Rgba32> Image)> decoded;
-                    try { decoded = G1tDecoder.DecodeAll(g1tRaw); }
-                    catch { continue; }
-
-                    var neededInternal = new HashSet<int>(grp.Select(s => s % texPerFile));
-
-                    foreach (var (intSlot, img) in decoded)
-                    {
-                        if (img == null) continue;
-
-                        if (!neededInternal.Contains(intSlot)) { img.Dispose(); continue; }
-
-                        int globalSlot = fileIdx * texPerFile + intSlot;
-                        string texName = $"{stem}_g1t{globalSlot}.png";
-                        string texPath = Path.Combine(exportDir, texName);
-
-                        try
-                        {
-                            using (img) img.SaveAsPng(texPath);
-                            texCount++;
-                            AppLogger.Info($"[SaveModel] Saved texture: {texName}");
-
-                            // Map every material that references this slot
-                            foreach (var (matIdx, slot, _, _, _, _) in model.MaterialTextures)
-                                if (slot == globalSlot)
-                                    matTexPaths.TryAdd(matIdx, texName);
-                        }
-                        catch (Exception ex2)
-                        {
-                            img.Dispose();
-                            AppLogger.Warn($"[SaveModel] PNG save failed ({texName}): {ex2.Message}");
-                        }
-                    }
-                }
-
-                // 6. Export geometry (OBJ/FBX) with texture references embedded in MTL
-                savedPath = G1mFbxExporter.Export(model, exportDir, stem, matTexPaths);
+                lowerBound = inSameFdata[i].Record.FdataOffset;
+                break;
             }
-            catch (Exception ex)
-            {
-                err = ex.Message;
-                AppLogger.Error($"[SaveModel] {ex}");
-            }
-        });
+        }
 
-        StatusText = err != null
-            ? $"내보내기 오류: {err}"
-            : $"저장 완료 → {savedPath}  ({texCount}개 텍스처)";
+        // Collect every companion-typed asset between the previous G1M and this G1M.
+        // Non-companion intermediary files (g1co, rigbin, xf1g …) are simply skipped.
+        return inSameFdata
+            .Where(a => s_g1mCompanionTypeKtids.Contains(a.Record.TypeKtid)
+                     && a.Record.FdataOffset >  lowerBound
+                     && a.Record.FdataOffset <  g1mOffset)
+            .ToList();
     }
-
-    private bool CanSaveModel(AssetItemViewModel? vm)
-        => (vm ?? SelectedAsset)?.TypeExt == ".g1m" && _extractor != null;
 
     private List<AssetItemViewModel> ResolveG1tFilesForModel(AssetItemViewModel vm)
     {
@@ -477,30 +407,62 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ── Export ────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Raw export — always names files <c>0x{hash:x8}.ext</c>.
+    /// G1M assets: exports into a subfolder and also pulls companion files
+    /// (KTID, MTL, GRP …) plus all linked G1T files.
+    /// Other assets: exports a single file into the base export directory.
+    /// </summary>
     [RelayCommand]
     private async Task ExportSelectedAsync()
     {
         if (SelectedAsset is null || _extractor is null) return;
 
-        var    rec      = SelectedAsset.Record;
-        string cont     = SelectedAsset.Container;
-        string fileName = BuildExportFileName(SelectedAsset);
-        string outDir   = Path.Combine(AppContext.BaseDirectory, "export");
-        string outPath  = Path.Combine(outDir, fileName);
+        var  vm    = SelectedAsset;
+        bool isG1m = vm.TypeExt == ".g1m";
 
-        StatusText = $"내보내는 중... {fileName}";
+        string baseDir  = Path.Combine(AppContext.BaseDirectory, "export");
+        string exportDir = isG1m
+            ? Path.Combine(baseDir, $"0x{vm.Record.FileKtid:x8}")
+            : baseDir;
 
+        StatusText = $"내보내는 중... 0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
+
+        var extractor = _extractor;
+        int count = 0;
         string? err = null;
+
         await Task.Run(() =>
         {
             try
             {
-                byte[] raw = _extractor.ExtractToMemory(rec, cont);
-                if (raw.Length == 0) { err = "빈 데이터 (추출 실패)"; return; }
+                Directory.CreateDirectory(exportDir);
 
-                Directory.CreateDirectory(outDir);
-                File.WriteAllBytes(outPath, raw);
-                AppLogger.Info($"[Export] {outPath} ({raw.Length:N0} bytes)");
+                if (isG1m)
+                {
+                    // Collect: G1M itself + companion files + linked G1T files
+                    var toExport = new List<AssetItemViewModel> { vm };
+                    toExport.AddRange(ResolveCompanionFiles(vm));
+                    toExport.AddRange(ResolveG1tFilesForModel(vm));
+
+                    foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))
+                    {
+                        string name   = $"0x{asset.Record.FileKtid:x8}{asset.TypeExt}";
+                        byte[] raw    = extractor.ExtractToMemory(asset.Record, asset.Container);
+                        File.WriteAllBytes(Path.Combine(exportDir, name), raw);
+                        AppLogger.Info($"[Export] {name} ({raw.Length:N0} B)");
+                        count++;
+                    }
+                }
+                else
+                {
+                    string name = $"0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
+                    byte[] raw  = extractor.ExtractToMemory(vm.Record, vm.Container);
+                    if (raw.Length == 0) { err = "빈 데이터 (추출 실패)"; return; }
+                    File.WriteAllBytes(Path.Combine(exportDir, name), raw);
+                    AppLogger.Info($"[Export] {name} ({raw.Length:N0} B)");
+                    count = 1;
+                }
             }
             catch (Exception ex)
             {
@@ -510,31 +472,8 @@ public sealed partial class MainViewModel : ObservableObject
         });
 
         StatusText = err is null
-            ? $"저장 완료 → {outPath}"
+            ? $"저장 완료 → {exportDir}  ({count}개 파일)"
             : $"내보내기 실패: {err}";
-    }
-
-    private static string BuildExportFileName(AssetItemViewModel vm)
-    {
-        string ext = vm.Record.TypeExt;
-
-        // Use recovered name stem when available, sanitised for filesystem use
-        if (vm.RecoveredName is { Length: > 0 } rn)
-        {
-            string stem = rn
-                .Replace('/', '_')
-                .Replace('\\', '_')
-                .Trim('_');
-            // Strip surrounding bracket wrappers like CE1Resource...[name]
-            int lb = stem.LastIndexOf('[');
-            int rb = stem.LastIndexOf(']');
-            if (lb >= 0 && rb > lb)
-                stem = stem[(lb + 1)..rb];
-
-            return stem + ext;
-        }
-
-        return vm.KtidHex + ext;
     }
 
     // ── Folder tree ───────────────────────────────────────────────────────────
