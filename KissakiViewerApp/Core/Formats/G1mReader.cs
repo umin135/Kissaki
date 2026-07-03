@@ -8,8 +8,10 @@ namespace KissakiViewer.Core.Formats;
 // One NUNO cloth entry: parent bone index + control points.
 // NUNO1 (DOA6): CPs are in local/bone space → transformed via parent bone (IsWorldSpace=false).
 // NUNO4 (FF2):  CPs are already in world space → used directly (IsWorldSpace=true).
-// NUNO5 (FF2/Yumia): CPs are in parent-bone local space but vertex CP indices are GLOBAL
-//   across all NUNO5 entries (single concatenated array, not per-entry local). UseGlobalIndex=true.
+// NUNO5 (FF2/Yumia): CPs are in parent-bone local space; after bone transform they reach world
+//   scale (~10-150 units). Vertex CP indices are LOCAL per-entry (same as NUNO1). However d=Cross(b,c)
+//   must be normalized before depth displacement because of world-scale magnitudes. UseGlobalIndex=true
+//   flags this normalization requirement; it does NOT change the CP indexing scheme.
 public sealed class NunoEntry
 {
     public int       ParentBoneId  { get; set; }
@@ -20,8 +22,8 @@ public sealed class NunoEntry
     public int[]     CpParents     { get; set; } = [];
     // NUNO4 (FF2): CPs are stored in world space; skip bone transform in ApplyNunoTransform.
     public bool      IsWorldSpace  { get; set; }
-    // NUNO5 (FF2/Yumia): vertex CP indices are GLOBAL across all NUNO5 entries (concatenated),
-    // not per-entry local like NUNO1. cpOffset must be 0 for these entries.
+    // NUNO5 (FF2/Yumia): world-scale CPs (after bone transform) require d=Cross(b,c) normalization
+    // before depth displacement. CP indexing is still LOCAL per-entry (same as NUNO1).
     public bool      UseGlobalIndex { get; set; }
 }
 
@@ -1449,16 +1451,16 @@ public static class G1mReader
             if (globalWCPs != null)
             {
                 wCPs = globalWCPs;
-                if (entry.IsWorldSpace || entry.UseGlobalIndex)
+                if (entry.IsWorldSpace)
                 {
-                    // NUNO4 (isWS=true) / NUNO5 (UseGlobalIndex=true):
-                    // CP indices in vertex data are GLOBAL — address globalWCPs directly from 0.
+                    // NUNO4 (isWS=true): CP indices in vertex data are GLOBAL — address globalWCPs directly from 0.
                     cpOffset   = 0;
                     cpMaxLocal = globalWCPs.Length;
                 }
                 else
                 {
-                    // Mixed model with non-global NUNO entry: per-entry local indices + global start offset.
+                    // NUNO5 (isWS=false, UseGlobalIndex=true): CP indices are LOCAL to this entry.
+                    // Add entry's global start offset so localIdx→globalWCPs[entryStart+localIdx].
                     cpOffset   = globalEntryStarts![nunoIdx];
                     cpMaxLocal = entry.ControlPoints.Length;
                 }
