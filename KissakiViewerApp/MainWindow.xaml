@@ -80,12 +80,15 @@
                           SelectedItemChanged="FolderTreeView_SelectedItemChanged">
                     <TreeView.Resources>
                         <Style TargetType="TreeViewItem">
+                            <Style.Resources>
+                                <SolidColorBrush x:Key="{x:Static adonisUI:Brushes.AccentBrush}" Color="#2A5FA0"/>
+                            </Style.Resources>
                             <Setter Property="IsExpanded" Value="True"/>
                             <Setter Property="Padding" Value="2,3"/>
                             <Setter Property="Foreground" Value="#DCDCDC"/>
                             <Style.Triggers>
                                 <Trigger Property="IsSelected" Value="True">
-                                    <Setter Property="Background" Value="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}"/>
+                                    <Setter Property="Background" Value="#2A5FA0"/>
                                     <Setter Property="Foreground" Value="White"/>
                                 </Trigger>
                                 <Trigger Property="IsMouseOver" Value="True">
@@ -161,6 +164,9 @@
                               Visibility="{Binding IsGridView, Converter={StaticResource InvertBoolToVis}}">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">
+                                <Style.Resources>
+                                    <SolidColorBrush x:Key="{x:Static adonisUI:Brushes.AccentBrush}" Color="#2A5FA0"/>
+                                </Style.Resources>
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                 <Setter Property="Padding" Value="6,3"/>
                                 <Setter Property="MinHeight" Value="26"/>
@@ -200,7 +206,7 @@
                                         <Setter Property="Background" Value="#1F1F1F"/>
                                     </Trigger>
                                     <Trigger Property="IsSelected" Value="True">
-                                        <Setter Property="Background" Value="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}"/>
+                                        <Setter Property="Background" Value="#2A5FA0"/>
                                         <Setter Property="Foreground" Value="White"/>
                                     </Trigger>
                                 </Style.Triggers>
@@ -271,6 +277,9 @@
                             </ListBox.ItemsPanel>
                             <ListBox.ItemContainerStyle>
                                 <Style TargetType="ListBoxItem">
+                                    <Style.Resources>
+                                        <SolidColorBrush x:Key="{x:Static adonisUI:Brushes.AccentBrush}" Color="#2A5FA0"/>
+                                    </Style.Resources>
                                     <Setter Property="Padding" Value="0"/>
                                     <Setter Property="Margin" Value="3"/>
                                     <Setter Property="HorizontalContentAlignment" Value="Center"/>
@@ -304,7 +313,7 @@
                                     </Setter>
                                     <Style.Triggers>
                                         <Trigger Property="IsSelected" Value="True">
-                                            <Setter Property="Background" Value="{DynamicResource {x:Static adonisUI:Brushes.AccentBrush}}"/>
+                                            <Setter Property="Background" Value="#2A5FA0"/>
                                         </Trigger>
                                     </Style.Triggers>
                                 </Style>

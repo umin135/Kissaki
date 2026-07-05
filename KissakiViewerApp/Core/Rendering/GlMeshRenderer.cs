@@ -21,11 +21,10 @@ public sealed class GlMeshRenderer : IDisposable
     private int _meshProg;
     private int _lineProg;
     private int _outlineProg;
-    private int _gridProg;
 
     // Mesh uniforms
     private int _uMeshMvp, _uMeshModel, _uMeshTex, _uMeshHasTex;
-    private int _uMeshLightDir, _uMeshAmbient, _uMeshAlphaCutoff;
+    private int _uMeshLightDir, _uMeshAmbient, _uMeshDither;
 
     // Line uniforms
     private int _uLineMvp, _uLineColor;
@@ -33,16 +32,11 @@ public sealed class GlMeshRenderer : IDisposable
     // Outline uniforms
     private int _uOutlineMvp, _uOutlineScale, _uOutlineColor;
 
-    // Grid uniforms
-    private int _uGridMvp, _uGridCamPos, _uGridFadeEnd;
-
     // ── Scene geometry ─────────────────────────────────────────────────────────
-    private readonly List<SubmeshGpu> _submeshes   = [];
-    private readonly List<LineBatch>  _boneBatches = [];
-    private readonly List<LineBatch>  _axisBatches = [];
-
-    private int   _gridVao, _gridVbo, _gridVertexCount;
-    private float _gridFadeEnd = 100f;
+    private readonly List<SubmeshGpu> _submeshes    = [];
+    private readonly List<LineBatch>  _boneBatches  = [];
+    private readonly List<LineBatch>  _axisBatches  = [];
+    private readonly List<LineBatch>  _gridBatches  = [];
 
     // ── Pending uploads ────────────────────────────────────────────────────────
     private G1mLoadData?  _pendingLoad;
@@ -135,8 +129,8 @@ public sealed class GlMeshRenderer : IDisposable
         if (!_leftDown || (dx == 0 && dy == 0)) return;
 
         // Orbit: yaw/pitch change, target and distance unchanged
-        _camYaw   += dx * OrbitSensitivity;
-        _camPitch -= dy * OrbitSensitivity;
+        _camYaw   -= dx * OrbitSensitivity;
+        _camPitch += dy * OrbitSensitivity;
         _camPitch  = Math.Clamp(_camPitch, -MathF.PI * 0.49f, MathF.PI * 0.49f);
     }
 
@@ -197,12 +191,15 @@ public sealed class GlMeshRenderer : IDisposable
             var right = Vector3.Cross(look, Vector3.UnitY).Normalized();
             float spd = _moveSpeed * dt;
 
-            if (_keysDown.Contains(Key.W)) _target += look           * spd;
-            if (_keysDown.Contains(Key.S)) _target -= look           * spd;
-            if (_keysDown.Contains(Key.A)) _target -= right          * spd;
-            if (_keysDown.Contains(Key.D)) _target += right          * spd;
-            if (_keysDown.Contains(Key.E)) _target += Vector3.UnitY  * spd;  // up
-            if (_keysDown.Contains(Key.Q)) _target -= Vector3.UnitY  * spd;  // down
+            // W/S: zoom only — change distance, target stays fixed
+            if (_keysDown.Contains(Key.W)) _distance = Math.Max(_minDist, _distance - spd);
+            if (_keysDown.Contains(Key.S)) _distance = Math.Min(_maxDist, _distance + spd);
+
+            // A/D/Q/E: translate target (camera follows)
+            if (_keysDown.Contains(Key.A)) _target -= right         * spd;
+            if (_keysDown.Contains(Key.D)) _target += right         * spd;
+            if (_keysDown.Contains(Key.E)) _target += Vector3.UnitY * spd;
+            if (_keysDown.Contains(Key.Q)) _target -= Vector3.UnitY * spd;
         }
 
         // ── Flush pending uploads ─────────────────────────────────────────────
@@ -218,25 +215,10 @@ public sealed class GlMeshRenderer : IDisposable
         var proj = Matrix4.CreatePerspectiveFieldOfView(MathHelper.DegreesToRadians(45f), aspect, 0.001f, 200_000f);
         var vp   = GetViewMatrix() * proj;
 
-        // ── Ground grid ───────────────────────────────────────────────────────
-        if (_gridVao != 0)
-        {
-            var camPos = GetCamPos();
-            GL.Enable(EnableCap.DepthTest);
-            GL.DepthFunc(DepthFunction.Less);
-            GL.Enable(EnableCap.Blend);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-            GL.UseProgram(_gridProg);
-            GL.UniformMatrix4(_uGridMvp,    false, ref vp);
-            GL.Uniform3(_uGridCamPos,  camPos);
-            GL.Uniform1(_uGridFadeEnd, _gridFadeEnd);
-            GL.BindVertexArray(_gridVao);
-            GL.DrawArrays(PrimitiveType.Lines, 0, _gridVertexCount);
-            GL.BindVertexArray(0);
-            GL.Disable(EnableCap.Blend);
-        }
-
-        // ── World axes ────────────────────────────────────────────────────────
+        // ── Ground grid + World axes (line program) ───────────────────────────
+        GL.Enable(EnableCap.DepthTest);
+        GL.DepthFunc(DepthFunction.Less);
+        RenderLineBatches(_gridBatches, vp);
         RenderLineBatches(_axisBatches, vp);
 
         // ── Opaque mesh pass ──────────────────────────────────────────────────
@@ -248,36 +230,26 @@ public sealed class GlMeshRenderer : IDisposable
 
         GL.UseProgram(_meshProg);
         SetMeshLighting();
-        GL.Uniform1(_uMeshAlphaCutoff, 0.1f);  // hard mask for opaque pass
 
         var identity = Matrix4.Identity;
         GL.UniformMatrix4(_uMeshModel, false, ref identity);
 
+        // Opaque pass — hard alpha cutoff (uDither = false)
+        GL.Uniform1(_uMeshDither, 0);
         foreach (var sm in _submeshes)
         {
             if (!sm.FinalVisible || sm.HasAlpha) continue;
             DrawSubmesh(sm, vp);
         }
 
-        // ── Alpha blend pass (sorted back-to-front) ────────────────────────────
+        // Alpha pass — Bayer dither discard, two-sided, no blend (uDither = true)
         GL.Disable(EnableCap.CullFace);
-        GL.Enable(EnableCap.Blend);
-        GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-        GL.DepthMask(false);   // don't write depth — prevents alpha meshes occluding each other
-        GL.Uniform1(_uMeshAlphaCutoff, 0.01f);  // allow soft-edge pixels through
-
-        var camPosForSort = GetCamPos();
-        // Sort alpha submeshes farthest-first
-        var alphaList = _submeshes
-            .Where(sm => sm.FinalVisible && sm.HasAlpha)
-            .OrderByDescending(sm => Vector3.DistanceSquared(sm.Center, camPosForSort))
-            .ToList();
-
-        foreach (var sm in alphaList)
+        GL.Uniform1(_uMeshDither, 1);
+        foreach (var sm in _submeshes)
+        {
+            if (!sm.FinalVisible || !sm.HasAlpha) continue;
             DrawSubmesh(sm, vp);
-
-        GL.DepthMask(true);
-        GL.Disable(EnableCap.Blend);
+        }
         GL.Enable(EnableCap.CullFace);
 
         // ── Outline pass (selected submeshes) ─────────────────────────────────
@@ -320,11 +292,10 @@ public sealed class GlMeshRenderer : IDisposable
         _submeshes.Clear();
         DeleteLineBatches(_boneBatches);
         DeleteLineBatches(_axisBatches);
-        DeleteGrid();
+        DeleteLineBatches(_gridBatches);
         if (_meshProg    != 0) GL.DeleteProgram(_meshProg);
         if (_lineProg    != 0) GL.DeleteProgram(_lineProg);
         if (_outlineProg != 0) GL.DeleteProgram(_outlineProg);
-        if (_gridProg    != 0) GL.DeleteProgram(_gridProg);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -339,15 +310,14 @@ public sealed class GlMeshRenderer : IDisposable
         _meshProg    = CompileProgram(shaderDir, "mesh");
         _lineProg    = CompileProgram(shaderDir, "line");
         _outlineProg = CompileProgram(shaderDir, "outline");
-        _gridProg    = CompileProgram(shaderDir, "grid");
 
-        _uMeshMvp         = GL.GetUniformLocation(_meshProg, "uMVP");
-        _uMeshModel       = GL.GetUniformLocation(_meshProg, "uModel");
-        _uMeshTex         = GL.GetUniformLocation(_meshProg, "uTex");
-        _uMeshHasTex      = GL.GetUniformLocation(_meshProg, "uHasTex");
-        _uMeshLightDir    = GL.GetUniformLocation(_meshProg, "uLightDir");
-        _uMeshAmbient     = GL.GetUniformLocation(_meshProg, "uAmbient");
-        _uMeshAlphaCutoff = GL.GetUniformLocation(_meshProg, "uAlphaCutoff");
+        _uMeshMvp      = GL.GetUniformLocation(_meshProg, "uMVP");
+        _uMeshModel    = GL.GetUniformLocation(_meshProg, "uModel");
+        _uMeshTex      = GL.GetUniformLocation(_meshProg, "uTex");
+        _uMeshHasTex   = GL.GetUniformLocation(_meshProg, "uHasTex");
+        _uMeshLightDir = GL.GetUniformLocation(_meshProg, "uLightDir");
+        _uMeshAmbient  = GL.GetUniformLocation(_meshProg, "uAmbient");
+        _uMeshDither   = GL.GetUniformLocation(_meshProg, "uDither");
 
         _uLineMvp   = GL.GetUniformLocation(_lineProg, "uMVP");
         _uLineColor = GL.GetUniformLocation(_lineProg, "uColor");
@@ -355,10 +325,6 @@ public sealed class GlMeshRenderer : IDisposable
         _uOutlineMvp   = GL.GetUniformLocation(_outlineProg, "uMVP");
         _uOutlineScale = GL.GetUniformLocation(_outlineProg, "uScale");
         _uOutlineColor = GL.GetUniformLocation(_outlineProg, "uOutlineColor");
-
-        _uGridMvp     = GL.GetUniformLocation(_gridProg, "uMVP");
-        _uGridCamPos  = GL.GetUniformLocation(_gridProg, "uCamPos");
-        _uGridFadeEnd = GL.GetUniformLocation(_gridProg, "uFadeEnd");
 
         BuildAxisLines();
         BuildGridLines(1.0f);
@@ -403,14 +369,15 @@ public sealed class GlMeshRenderer : IDisposable
             _axisBatches.Add(UploadLineBatch(pts, PrimitiveType.Lines, col, 1.5f));
     }
 
-    // ── Ground grid on XZ plane ───────────────────────────────────────────────
+    // ── Ground grid on XZ plane (uses line program — always reliable) ────────
 
     private void BuildGridLines(float modelSize)
     {
-        DeleteGrid();
+        DeleteLineBatches(_gridBatches);
+        _gridBatches.Clear();
+
         float step   = MathF.Max(modelSize / 5f, 1e-4f);
-        float extent = step * 200f;
-        _gridFadeEnd = extent * 0.8f;
+        float extent = step * 150f;
 
         var pts = new List<float>();
         for (float z = -extent; z <= extent + step * 0.5f; z += step)
@@ -418,23 +385,9 @@ public sealed class GlMeshRenderer : IDisposable
         for (float x = -extent; x <= extent + step * 0.5f; x += step)
             pts.AddRange([x, 0f, -extent,   x, 0f, extent]);
 
-        float[] arr = [.. pts];
-        GL.GenVertexArrays(1, out _gridVao);
-        GL.BindVertexArray(_gridVao);
-        GL.GenBuffers(1, out _gridVbo);
-        GL.BindBuffer(BufferTarget.ArrayBuffer, _gridVbo);
-        GL.BufferData(BufferTarget.ArrayBuffer, arr.Length * sizeof(float), arr, BufferUsageHint.StaticDraw);
-        GL.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), 0);
-        GL.EnableVertexAttribArray(0);
-        GL.BindVertexArray(0);
-        _gridVertexCount = arr.Length / 3;
-    }
-
-    private void DeleteGrid()
-    {
-        if (_gridVao != 0) { GL.DeleteVertexArray(_gridVao); _gridVao = 0; }
-        if (_gridVbo != 0) { GL.DeleteBuffer(_gridVbo);      _gridVbo = 0; }
-        _gridVertexCount = 0;
+        if (pts.Count > 0)
+            _gridBatches.Add(UploadLineBatch([.. pts], PrimitiveType.Lines,
+                new Vector4(0.22f, 0.22f, 0.22f, 1f), 1f));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -597,31 +550,8 @@ public sealed class GlMeshRenderer : IDisposable
         if (nunoParentPts.Count > 0)
             _boneBatches.Add(UploadLineBatch([.. nunoParentPts], PrimitiveType.Points, new Vector4(1f, 0.6f, 0f, 1f), 7f));
 
-        if (skelCount < model.Bones.Length)
-        {
-            var cpLinePts = new List<float>();
-            for (int i = skelCount; i < model.Bones.Length; i++)
-            {
-                var bone = model.Bones[i]; int pi = bone.ParentIndex;
-                if (pi >= skelCount && pi < model.Bones.Length
-                    && IsValid(model.Bones[pi].WorldPosition) && IsValid(bone.WorldPosition))
-                {
-                    var pp = model.Bones[pi].WorldPosition; var bp = bone.WorldPosition;
-                    cpLinePts.AddRange([pp.X, pp.Y, pp.Z, bp.X, bp.Y, bp.Z]);
-                }
-            }
-            if (cpLinePts.Count > 0)
-                _boneBatches.Add(UploadLineBatch([.. cpLinePts], PrimitiveType.Lines, new Vector4(0f, 1f, 1f, 1f), 1f));
-
-            var cpDotPts = new List<float>();
-            for (int i = skelCount; i < model.Bones.Length; i++)
-            {
-                var p = model.Bones[i].WorldPosition;
-                if (IsValid(p)) cpDotPts.AddRange([p.X, p.Y, p.Z]);
-            }
-            if (cpDotPts.Count > 0)
-                _boneBatches.Add(UploadLineBatch([.. cpDotPts], PrimitiveType.Points, new Vector4(0f, 1f, 1f, 1f), 4f));
-        }
+        // NUNO control point nodes are excluded intentionally —
+        // their dense grid-like layout is visually confusing as a bone overlay.
     }
 
     // ══════════════════════════════════════════════════════════════════════════
