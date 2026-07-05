@@ -29,8 +29,8 @@
   <ItemGroup>
     <PackageReference Include="AdonisUI" Version="1.17.1" />
     <PackageReference Include="AdonisUI.ClassicTheme" Version="1.17.1" />
-<PackageReference Include="BCnEncoder.Net" Version="2.1.1" />
-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.5" />
+<PackageReference Include="BCnEncoder.Net" Version="2.2.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.7" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
     <PackageReference Include="Ookii.Dialogs.Wpf" Version="5.0.1" />
     <PackageReference Include="OpenTK" Version="4.9.3" />
