@@ -517,12 +517,20 @@ public sealed partial class MainViewModel : ObservableObject
     /// Single:  export/&lt;GameExe&gt;/&lt;rdbName&gt;/
     /// Bundle:  export/&lt;GameExe&gt;/&lt;rdbName&gt;/0x{ktid}/
     /// </summary>
+    private static string ExportFileName(AssetItemViewModel vm)
+        => AppSettingsService.Current.UseRestoredName && vm.RecoveredName != null
+            ? vm.DisplayFileName
+            : $"0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
+
     private string GetExportDir(AssetItemViewModel vm, bool bundle)
     {
         string gameExe = Path.GetFileNameWithoutExtension(_profile.ExeName);
         string rdbBase = Path.GetFileNameWithoutExtension(vm.RdbName);
         string baseDir = Path.Combine(AppSettingsService.GetEffectiveExportDirectory(), gameExe, rdbBase);
-        return bundle ? Path.Combine(baseDir, $"0x{vm.Record.FileKtid:x8}") : baseDir;
+        string subFolder = AppSettingsService.Current.UseRestoredName && vm.RecoveredName != null
+            ? vm.DisplayName
+            : $"0x{vm.Record.FileKtid:x8}";
+        return bundle ? Path.Combine(baseDir, subFolder) : baseDir;
     }
 
     /// <summary>Single-file raw export: exports only the selected asset (any type).</summary>
@@ -533,7 +541,7 @@ public sealed partial class MainViewModel : ObservableObject
         var vm = SelectedAsset;
 
         string exportDir = GetExportDir(vm, bundle: false);
-        string name      = $"0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
+        string name      = ExportFileName(vm);
 
         StatusText = $"Exporting... {name}";
         var extractor = _extractor;
@@ -613,7 +621,7 @@ public sealed partial class MainViewModel : ObservableObject
 
                 foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))
                 {
-                    string name = $"0x{asset.Record.FileKtid:x8}{asset.TypeExt}";
+                    string name = ExportFileName(asset);
                     byte[] raw  = extractor.ExtractToMemory(asset.Record, asset.Container);
                     File.WriteAllBytes(Path.Combine(exportDir, name), raw);
                     AppLogger.Info($"[Bundle] {name} ({raw.Length:N0} B)");

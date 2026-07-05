@@ -90,6 +90,24 @@
                             Click="BrowseExportDir_Click"/>
                 </Grid>
 
+                <!-- Use Restored Name row -->
+                <Grid Margin="0,0,0,18">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="Export Name"
+                               VerticalAlignment="Center"
+                               FontSize="12"/>
+                    <CheckBox Grid.Column="1"
+                              x:Name="UseRestoredNameCheck"
+                              Content="Extract using the restored name"
+                              VerticalAlignment="Center"
+                              Margin="8,0"
+                              FontSize="12"/>
+                </Grid>
+
                 <!-- Delete DB Cache row -->
                 <Grid>
                     <Grid.ColumnDefinitions>

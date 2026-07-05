@@ -13,6 +13,7 @@ public partial class SettingsWindow : Window
     {
         InitializeComponent();
         ExportDirBox.Text = AppSettingsService.GetEffectiveExportDirectory();
+        UseRestoredNameCheck.IsChecked = AppSettingsService.Current.UseRestoredName;
     }
 
     private void BrowseExportDir_Click(object sender, RoutedEventArgs e)
@@ -57,7 +58,8 @@ public partial class SettingsWindow : Window
     {
         AppSettingsService.Save(new AppSettings
         {
-            ExportDirectory = ExportDirBox.Text.Trim(),
+            ExportDirectory  = ExportDirBox.Text.Trim(),
+            UseRestoredName  = UseRestoredNameCheck.IsChecked == true,
         });
         Close();
     }
@@ -65,5 +67,6 @@ public partial class SettingsWindow : Window
     private void ResetDefault_Click(object sender, RoutedEventArgs e)
     {
         ExportDirBox.Text = AppSettingsService.DefaultExportDirectory;
+        UseRestoredNameCheck.IsChecked = false;
     }
 }

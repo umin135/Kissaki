@@ -33,6 +33,8 @@ public static class AppSettingsService
                 string val = line[(eq + 1)..].Trim();
                 if (key.Equals("ExportDirectory", StringComparison.OrdinalIgnoreCase))
                     s.ExportDirectory = val;
+                else if (key.Equals("UseRestoredName", StringComparison.OrdinalIgnoreCase))
+                    s.UseRestoredName = val.Equals("true", StringComparison.OrdinalIgnoreCase);
             }
         }
         catch { /* non-critical */ }
@@ -45,7 +47,7 @@ public static class AppSettingsService
         {
             Current = settings;
             File.WriteAllText(IniPath,
-                $"[General]\r\nExportDirectory={settings.ExportDirectory}\r\n");
+                $"[General]\r\nExportDirectory={settings.ExportDirectory}\r\nUseRestoredName={settings.UseRestoredName.ToString().ToLower()}\r\n");
         }
         catch { /* non-critical */ }
     }
