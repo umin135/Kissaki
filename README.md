@@ -55,8 +55,6 @@ I developed Kissaki by referring to the following projects :
 - Nominom ([BCnEncoder.NET](https://github.com/Nominom/BCnEncoder.NET))
 - therathatter ([GitHub](https://github.com/therathatter))
 - Jupisoft111 ([GitHub](https://github.com/Jupisoft111))
-- Luigi Auriemma ([aluigi.altervista.org](https://aluigi.altervista.org/))
-- Semory / Howfie ([Gas Machine](https://www.xnalara.org/viewtopic.php?t=1001))
 - vagonumero13 (SRSXtool)
 _(Please let me know if anything has been omitted.)_
 
