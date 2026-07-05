@@ -36,7 +36,7 @@ public sealed partial class GameLauncherViewModel : ObservableObject
     private async Task ScanAsync()
     {
         IsScanning = true;
-        StatusText = "Steam 라이브러리 스캔 중...";
+        StatusText = "Scanning Steam libraries...";
 
         List<GameProfile> found = await Task.Run(SteamScanner.Scan);
 
@@ -53,7 +53,7 @@ public sealed partial class GameLauncherViewModel : ObservableObject
         }
 
         PersistSettings();
-        StatusText = added > 0 ? $"{added}개 게임 추가됨." : "새로운 게임을 찾지 못했습니다.";
+        StatusText = added > 0 ? $"{added} game(s) added." : "No new games found.";
         IsScanning = false;
     }
 
@@ -62,7 +62,7 @@ public sealed partial class GameLauncherViewModel : ObservableObject
     {
         var dlg = new VistaFolderBrowserDialog
         {
-            Description            = "KatanaEngine 게임 폴더를 선택하세요 (root.rdb 포함 폴더)",
+            Description            = "Select KatanaEngine game folder (containing root.rdb)",
             UseDescriptionForTitle = true,
         };
         if (dlg.ShowDialog() != true) return;
@@ -70,20 +70,20 @@ public sealed partial class GameLauncherViewModel : ObservableObject
         string dir = dlg.SelectedPath;
         if (SteamScanner.FindRdbDir(dir) == null)
         {
-            StatusText = "root.rdb를 찾을 수 없습니다. KatanaEngine 게임 경로를 선택하세요.";
+            StatusText = "root.rdb not found. Please select a KatanaEngine game folder.";
             return;
         }
 
         bool exists = Games.Any(g => string.Equals(g.GameDirectory, dir, StringComparison.OrdinalIgnoreCase));
-        if (exists) { StatusText = "이미 목록에 있는 게임입니다."; return; }
+        if (exists) { StatusText = "This game is already in the list."; return; }
 
         GameProfile? profile = SteamScanner.DetectFromDirectory(dir);
-        if (profile == null) { StatusText = "게임 정보를 인식하지 못했습니다."; return; }
+        if (profile == null) { StatusText = "Could not detect game information."; return; }
 
         Games.Add(profile);
         SelectedGame = profile;
         PersistSettings();
-        StatusText = $"추가됨: {profile.Name}";
+        StatusText = $"Added: {profile.Name}";
     }
 
     [RelayCommand(CanExecute = nameof(CanRemove))]
@@ -93,7 +93,7 @@ public sealed partial class GameLauncherViewModel : ObservableObject
         Games.Remove(SelectedGame);
         SelectedGame = null;
         PersistSettings();
-        StatusText = "제거됨.";
+        StatusText = "Removed.";
     }
     private bool CanRemove() => SelectedGame != null;
 

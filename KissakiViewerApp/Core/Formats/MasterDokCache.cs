@@ -217,8 +217,8 @@ public sealed class MasterDokCache
             if (hasDm)
             {
                 AppLogger.Info(
-                    $"[MasterDokCache] DM DOK 발견: 0x{dok.Record.FileKtid:X8} " +
-                    $"(G1M 참조 {count}개, 크기 {dok.Record.SizeInContainer:N0} B)");
+                    $"[MasterDokCache] DM DOK found: 0x{dok.Record.FileKtid:X8} " +
+                    $"({count} G1M refs, {dok.Record.SizeInContainer:N0} B)");
                 dmDoks.Add((data, dok.Record.FileKtid, count));
             }
             else if (count > fbCount)
@@ -235,11 +235,11 @@ public sealed class MasterDokCache
         if (fbData != null)
         {
             AppLogger.Info(
-                $"[MasterDokCache] DM DOK 없음, 폴백: 0x{fbKtid:X8} (G1M 참조 {fbCount}개)");
+                $"[MasterDokCache] No DM DOK, fallback: 0x{fbKtid:X8} ({fbCount} G1M refs)");
             return ParseMasterDok(fbData);
         }
 
-        AppLogger.Warn("[MasterDokCache] 마스터 DOK를 찾을 수 없음");
+        AppLogger.Warn("[MasterDokCache] Master DOK not found");
         return null;
     }
 
@@ -261,9 +261,9 @@ public sealed class MasterDokCache
         }
 
         AppLogger.Info(
-            $"[MasterDokCache] {dmDoks.Count}개 DM DOK 병합: " +
-            $"{g1mFkToKtidFk.Count}개 G1M→KTID, {objIdToG1tFk.Count}개 objId→G1T, " +
-            $"{g1mFkToGrpFk.Count}개 G1M→GRP, {g1mFkToOidexFk.Count}개 G1M→OIDEX");
+            $"[MasterDokCache] Merged {dmDoks.Count} DM DOKs: " +
+            $"{g1mFkToKtidFk.Count} G1M→KTID, {objIdToG1tFk.Count} objId→G1T, " +
+            $"{g1mFkToGrpFk.Count} G1M→GRP, {g1mFkToOidexFk.Count} G1M→OIDEX");
 
         if (g1mFkToKtidFk.Count == 0 && g1mFkToGrpFk.Count == 0) return null;
         return new MasterContext(g1mFkToKtidFk, objIdToG1tFk, g1mFkToGrpFk, g1mFkToOidexFk);

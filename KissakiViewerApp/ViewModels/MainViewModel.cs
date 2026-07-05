@@ -1,9 +1,10 @@
-using CommunityToolkit.Mvvm.ComponentModel;
+﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using KissakiViewer.Core;
 using KissakiViewer.Core.Formats;
 using KissakiViewer.Models;
 using KissakiViewer.Services;
+using System.Reflection;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using System.Collections.ObjectModel;
@@ -28,7 +29,7 @@ public sealed partial class MainViewModel : ObservableObject
     private AssetItemViewModel? _selectedAsset;
 
     [ObservableProperty]
-    private string _statusText = "에셋 로딩 중...";
+    private string _statusText = "Loading assets...";
 
     [ObservableProperty]
     private string _filterText = string.Empty;
@@ -109,7 +110,7 @@ public sealed partial class MainViewModel : ObservableObject
     public MainViewModel(GameProfile profile)
     {
         _profile    = profile;
-        WindowTitle = $"Kissaki — {profile.Name} ({profile.GameDirectory})";
+        WindowTitle = $"Kissaki v{AppSettingsService.AppVersion} — {profile.Name} ({profile.GameDirectory})";
 
         AppLogger.LogAdded += line =>
             System.Windows.Application.Current?.Dispatcher.BeginInvoke(
@@ -141,15 +142,15 @@ public sealed partial class MainViewModel : ObservableObject
 
         if (rdbFiles.Length == 0)
         {
-            StatusText = $"RDB 파일 없음: {fdataDir}";
+            StatusText = $"No RDB files found in: {fdataDir}";
             return;
         }
 
         IsLoading    = true;
         LoadProgress = 0;
         StatusText   = rdbFiles.Length == 1
-            ? $"{Path.GetFileName(rdbFiles[0])} 파싱 중..."
-            : $"RDB 파싱 중... ({rdbFiles.Length}개 파일)";
+            ? $"Parsing {Path.GetFileName(rdbFiles[0])}..."
+            : $"Parsing RDB files... ({rdbFiles.Length} files)";
 
         List<AssetItemViewModel>?                                          batch    = null;
         Dictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>>?   g1tByFid = null;
@@ -183,7 +184,7 @@ public sealed partial class MainViewModel : ObservableObject
                         : Path.ChangeExtension(rdbFile, ".rdx");
 
                     if (actualRdb != rdbFile)
-                        AppLogger.Info($"[RDB] Kashira 백업 감지 → {rdbName} 백업본 사용");
+                        AppLogger.Info($"[RDB] Kashira backup detected, using backup of {rdbName}");
 
                     // Record the file that was actually used for cache invalidation.
                     long modTicks = File.GetLastWriteTimeUtc(actualRdb).Ticks;
@@ -194,7 +195,7 @@ public sealed partial class MainViewModel : ObservableObject
 
                     if (!reader.Load())
                     {
-                        AppLogger.Warn($"[RDB] 로드 실패: {rdbName}");
+                        AppLogger.Warn($"[RDB] Failed to load: {rdbName}");
                         continue;
                     }
 
@@ -210,11 +211,11 @@ public sealed partial class MainViewModel : ObservableObject
                         list.Add(new AssetItemViewModel(rec, container, rdbName));
                     }
 
-                    AppLogger.Info($"[RDB] {rdbName}: {reader.Entries.Count:N0}개");
+                    AppLogger.Info($"[RDB] {rdbName}: {reader.Entries.Count:N0} entries");
                 }
 
                 if (_rdb == null)
-                    throw new InvalidDataException("로드된 RDB 없음");
+                    throw new InvalidDataException("No RDB files loaded");
 
                 // G1T index keyed by (rdbName, fdataId) so proximity search stays within one RDB.
                 var fid = list
@@ -234,7 +235,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
         catch (Exception ex) { err = ex.Message; }
 
-        if (err != null) { StatusText = $"오류: {err}"; IsLoading = false; return; }
+        if (err != null) { StatusText = $"Error: {err}"; IsLoading = false; return; }
 
         Assets           = new ObservableCollection<AssetItemViewModel>(batch!);
         _allG1tByFid     = g1tByFid!;
@@ -242,12 +243,12 @@ public sealed partial class MainViewModel : ObservableObject
         _masterDokCache  = new MasterDokCache(batch!, _extractor!);
 
         BuildTypeFilters();
-        AppLogger.Info($"에셋 로드 완료: {Assets.Count:N0}개");
+        AppLogger.Info($"Assets loaded: {Assets.Count:N0}");
 
         // Share the same collection as the initial filtered view (no filter is active yet).
         // ApplyFilterAsync will replace FilteredAssets with a new OC when a filter is applied.
         FilteredAssets = Assets;
-        StatusText     = $"{batch!.Count:N0}개 에셋";
+        StatusText     = $"{batch!.Count:N0} assets";
 
         IsLoading    = false;
         LoadProgress = 100;
@@ -264,7 +265,7 @@ public sealed partial class MainViewModel : ObservableObject
 
         IsLoading    = true;
         LoadProgress = 0;
-        StatusText   = "이름 사전 로드 중...";
+        StatusText   = "Loading name dictionary...";
 
         await RunNameRecoveryAsync();
         LoadProgress = 20;
@@ -278,7 +279,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (cached != null)
         {
             // ── Fast path: restore mappings from cache ────────────────────────
-            StatusText = "캐시에서 G1M→G1T 매핑 로드 중...";
+            StatusText = "Loading G1M→G1T map from cache...";
 
             var combinedG1tMap = new Dictionary<uint, IReadOnlyList<AssetItemViewModel>>();
             foreach (var (g1mFk, slots) in cached.G1mToG1tSlots)
@@ -300,14 +301,14 @@ public sealed partial class MainViewModel : ObservableObject
             _masterDokCache?.PreloadG1tResults(_g1mToG1tMap);
 
             AppLogger.Info(
-                $"[Cache] 복원 완료: {combinedG1tMap.Count}개 G1M→G1T, " +
-                $"{cached.G1mToGrp.Count}개 GRP, {cached.G1mToOidex.Count}개 OIDEX");
+                $"[Cache] Restored: {combinedG1tMap.Count} G1M→G1T, " +
+                $"{cached.G1mToGrp.Count} GRP, {cached.G1mToOidex.Count} OIDEX");
         }
         else
         {
             // ── Slow path: full DOK scan — show overlay to block UI ───────────
             IsInitializing = true;
-            StatusText     = "G1M→G1T 매핑 구축 중... (최초 로드 — 이후에는 캐시에서 즉��� 로드됩니다)";
+            StatusText     = "Building G1M→G1T map... (first load — subsequent starts use cache)";
 
             var snapshot = Assets.ToList();
             var ext      = _extractor;
@@ -340,7 +341,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (_masterDokCache != null)
             {
                 LoadProgress = 96;
-                StatusText   = "GRP/OIDEX 매핑 완성 중...";
+                StatusText   = "Building GRP/OIDEX maps...";
                 var (grpMap, oidexMap) = await _masterDokCache.GetCompanionMapsAsync();
                 _cachedG1mToGrpFk   = grpMap;
                 _cachedG1mToOidexFk = oidexMap;
@@ -351,7 +352,7 @@ public sealed partial class MainViewModel : ObservableObject
 
             // Save to cache
             LoadProgress = 97;
-            StatusText   = "캐시 저장 중...";
+            StatusText   = "Saving cache...";
             try
             {
                 var slotsForCache = combinedMap.ToDictionary(
@@ -367,17 +368,17 @@ public sealed partial class MainViewModel : ObservableObject
                     _cachedG1mToGrpFk ?? new Dictionary<uint, uint>(),
                     _cachedG1mToOidexFk ?? new Dictionary<uint, uint>());
 
-                AppLogger.Info($"[Cache] 저장 완료: {combinedMap.Count}개 G1M→G1T");
+                AppLogger.Info($"[Cache] Saved: {combinedMap.Count} G1M→G1T entries");
             }
             catch (Exception ex)
             {
-                AppLogger.Warn($"[Cache] 저장 실패: {ex.Message}");
+                AppLogger.Warn($"[Cache] Save failed: {ex.Message}");
             }
 
             IsInitializing = false;
         }
 
-        StatusText   = $"준비 완료: {Assets.Count:N0}개 에셋, {_nameMap.Count:N0}개 파일명 복구";
+        StatusText   = $"Ready: {Assets.Count:N0} assets, {_nameMap.Count:N0} names recovered";
         IsLoading    = false;
         LoadProgress = 100;
     }
@@ -396,12 +397,12 @@ public sealed partial class MainViewModel : ObservableObject
         if (File.Exists(csvPath))
         {
             names = await Task.Run(() => NameDictionaryService.Load(csvPath));
-            AppLogger.Info($"[NameDictionary] CSV 로드 (AppID={appId}): {names.Count}개");
+            AppLogger.Info($"[NameDictionary] CSV loaded (AppID={appId}): {names.Count} entries");
         }
         else
         {
             names = [];
-            AppLogger.Info($"[NameDictionary] CSV 없음 (AppID={appId})");
+            AppLogger.Info($"[NameDictionary] No CSV found (AppID={appId})");
         }
 
         _nameMap = names;
@@ -417,7 +418,7 @@ public sealed partial class MainViewModel : ObservableObject
         });
 
         int matched = snapshot.Count(a => a.RecoveredName != null);
-        AppLogger.Info($"[NameDictionary] {names.Count}개 로드, {matched}개 적용");
+        AppLogger.Info($"[NameDictionary] {names.Count} loaded, {matched} applied");
     }
 
     // ── G1M companion file discovery ─────────────────────────────────────────
@@ -521,7 +522,7 @@ public sealed partial class MainViewModel : ObservableObject
     {
         string gameExe = Path.GetFileNameWithoutExtension(_profile.ExeName);
         string rdbBase = Path.GetFileNameWithoutExtension(vm.RdbName);
-        string baseDir = Path.Combine(AppContext.BaseDirectory, "export", gameExe, rdbBase);
+        string baseDir = Path.Combine(AppSettingsService.GetEffectiveExportDirectory(), gameExe, rdbBase);
         return bundle ? Path.Combine(baseDir, $"0x{vm.Record.FileKtid:x8}") : baseDir;
     }
 
@@ -535,7 +536,7 @@ public sealed partial class MainViewModel : ObservableObject
         string exportDir = GetExportDir(vm, bundle: false);
         string name      = $"0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
 
-        StatusText = $"내보내는 중... {name}";
+        StatusText = $"Exporting... {name}";
         var extractor = _extractor;
         string? err = null;
 
@@ -550,12 +551,12 @@ public sealed partial class MainViewModel : ObservableObject
                 if ((long)vm.Record.FileSize > FdataExtractor.StreamingThreshold)
                 {
                     long bytes = extractor.ExtractToFile(vm.Record, vm.Container, outPath);
-                    if (bytes < 0) err = "스트리밍 추출 실패";
+                    if (bytes < 0) err = "Streaming extraction failed";
                 }
                 else
                 {
                     byte[] raw = extractor.ExtractToMemory(vm.Record, vm.Container);
-                    if (raw.Length == 0) { err = "빈 데이터 (추출 실패)"; return; }
+                    if (raw.Length == 0) { err = "Empty data (extraction failed)"; return; }
                     File.WriteAllBytes(outPath, raw);
                     AppLogger.Info($"[Export] {name} ({raw.Length:N0} B)");
                 }
@@ -564,8 +565,8 @@ public sealed partial class MainViewModel : ObservableObject
         });
 
         StatusText = err is null
-            ? $"저장 완료 → {Path.Combine(exportDir, name)}"
-            : $"내보내기 실패: {err}";
+            ? $"Saved → {Path.Combine(exportDir, name)}"
+            : $"Export failed: {err}";
     }
 
     /// <summary>
@@ -579,7 +580,7 @@ public sealed partial class MainViewModel : ObservableObject
         var vm = SelectedAsset;
 
         string exportDir = GetExportDir(vm, bundle: true);
-        StatusText = $"번들 내보내는 중... 0x{vm.Record.FileKtid:x8}";
+        StatusText = $"Exporting bundle... 0x{vm.Record.FileKtid:x8}";
 
         var extractor = _extractor;
         int count  = 0;
@@ -624,8 +625,8 @@ public sealed partial class MainViewModel : ObservableObject
         });
 
         StatusText = err is null
-            ? $"번들 저장 완료 → {exportDir}  ({count}개 파일)"
-            : $"번들 내보내기 실패: {err}";
+            ? $"Bundle saved → {exportDir}  ({count} files)"
+            : $"Bundle export failed: {err}";
     }
 
     // ── Folder tree ───────────────────────────────────────────────────────────
@@ -772,8 +773,8 @@ public sealed partial class MainViewModel : ObservableObject
         FilteredAssets = new ObservableCollection<AssetItemViewModel>(filtered);
         int total = Assets.Count;
         StatusText = filtered.Count == total
-            ? $"{total:N0}개 에셋"
-            : $"{filtered.Count:N0} / {total:N0}개 에셋 (필터)";
+            ? $"{total:N0} assets"
+            : $"{filtered.Count:N0} / {total:N0} assets (filtered)";
     }
 
     private void BuildTypeFilters()

@@ -108,13 +108,13 @@ public sealed class GameLoadCache
                 g1mToOidex[br.ReadUInt32()] = br.ReadUInt32();
 
             AppLogger.Info(
-                $"[Cache] 캐시 유효: {g1tCount}개 G1M→G1T, " +
-                $"{grpCount}개 GRP, {oidxCount}개 OIDEX");
+                $"[Cache] Cache valid: {g1tCount} G1M→G1T, " +
+                $"{grpCount} GRP, {oidxCount} OIDEX");
             return new GameLoadCache(g1mToG1t, g1mToGrp, g1mToOidex);
         }
         catch (Exception ex)
         {
-            AppLogger.Warn($"[Cache] 로드 실패 — 재생성: {ex.Message}");
+            AppLogger.Warn($"[Cache] Load failed — rebuilding: {ex.Message}");
             return null;
         }
     }

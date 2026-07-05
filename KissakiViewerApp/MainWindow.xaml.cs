@@ -87,6 +87,16 @@ public partial class MainWindow : Window
         _viewerWindow.Activate();
     }
 
+    private void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        new SettingsWindow { Owner = this }.ShowDialog();
+    }
+
+    private void Help_Click(object sender, RoutedEventArgs e)
+    {
+        new HelpWindow { Owner = this }.ShowDialog();
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         _viewerWindow?.Close();

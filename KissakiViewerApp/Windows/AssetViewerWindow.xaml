@@ -381,7 +381,7 @@
                   Background="{DynamicResource {x:Static adonisUI:Brushes.Layer0BackgroundBrush}}">
 
                 <!-- No tabs placeholder -->
-                <TextBlock Text="에셋을 더블 클릭하면 이곳에 열립니다."
+                <TextBlock Text="Double-click an asset to open it here."
                            HorizontalAlignment="Center" VerticalAlignment="Center"
                            FontSize="13"
                            Foreground="{DynamicResource {x:Static adonisUI:Brushes.DisabledForegroundBrush}}"
@@ -391,7 +391,7 @@
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
                             Visibility="{Binding SelectedTab.IsLoading, Converter={StaticResource BoolToVis},
                                                  FallbackValue=Collapsed}">
-                    <TextBlock Text="로딩 중..." FontSize="14"
+                    <TextBlock Text="Loading..." FontSize="14"
                                Foreground="{DynamicResource {x:Static adonisUI:Brushes.DisabledForegroundBrush}}"
                                HorizontalAlignment="Center"/>
                 </StackPanel>

@@ -43,8 +43,8 @@
                     </Style>
                 </Menu.ItemContainerStyle>
                 <MenuItem Header="View"/>
-                <MenuItem Header="Settings"/>
-                <MenuItem Header="Help"/>
+                <MenuItem Header="Settings" Click="Settings_Click"/>
+                <MenuItem Header="Help" Click="Help_Click"/>
             </Menu>
         </Border>
 
@@ -80,15 +80,12 @@
                           SelectedItemChanged="FolderTreeView_SelectedItemChanged">
                     <TreeView.Resources>
                         <Style TargetType="TreeViewItem">
-                            <Style.Resources>
-                                <SolidColorBrush x:Key="{x:Static adonisUI:Brushes.AccentBrush}" Color="#2A5FA0"/>
-                            </Style.Resources>
                             <Setter Property="IsExpanded" Value="True"/>
                             <Setter Property="Padding" Value="2,3"/>
                             <Setter Property="Foreground" Value="#DCDCDC"/>
                             <Style.Triggers>
                                 <Trigger Property="IsSelected" Value="True">
-                                    <Setter Property="Background" Value="#2A5FA0"/>
+                                    <Setter Property="Background" Value="#c0392b"/>
                                     <Setter Property="Foreground" Value="White"/>
                                 </Trigger>
                                 <Trigger Property="IsMouseOver" Value="True">
@@ -134,14 +131,16 @@
                                   SelectedItem="{Binding SelectedTypeFilter}"
                                   Width="90" Margin="6,0"/>
 
+                        <!-- TODO: Grid view layout broken (all items in one row) — re-enable after fix -->
                         <ToggleButton DockPanel.Dock="Right"
                                       IsChecked="{Binding IsGridView}"
                                       ToolTip="Grid View"
-                                      Padding="6,3">
+                                      Padding="6,3"
+                                      Visibility="Collapsed">
                             <TextBlock Text="⊞" FontSize="13"/>
                         </ToggleButton>
                         <ToggleButton DockPanel.Dock="Right"
-                                      IsChecked="{Binding IsGridView, Converter={StaticResource InvertBool}}"
+                                      IsChecked="{Binding IsGridView, Converter={StaticResource InvertBool}, Mode=OneWay}"
                                       ToolTip="List View"
                                       Padding="6,3" Margin="0,0,2,0">
                             <TextBlock Text="≡" FontSize="14"/>
@@ -164,13 +163,30 @@
                               Visibility="{Binding IsGridView, Converter={StaticResource InvertBoolToVis}}">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">
-                                <Style.Resources>
-                                    <SolidColorBrush x:Key="{x:Static adonisUI:Brushes.AccentBrush}" Color="#2A5FA0"/>
-                                </Style.Resources>
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                 <Setter Property="Padding" Value="6,3"/>
                                 <Setter Property="MinHeight" Value="26"/>
                                 <Setter Property="Foreground" Value="#DCDCDC"/>
+                                <Setter Property="Background" Value="Transparent"/>
+                                <!-- Replace AdonisUI template to remove gradient highlight -->
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="ListViewItem">
+                                            <Border x:Name="Bd"
+                                                    Background="{TemplateBinding Background}"
+                                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                                    Padding="{TemplateBinding Padding}"
+                                                    MinHeight="{TemplateBinding MinHeight}"
+                                                    SnapsToDevicePixels="True">
+                                                <GridViewRowPresenter
+                                                    HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                    VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                                    SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                                            </Border>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
                                 <!-- Tag = MainViewModel proxy so ContextMenu can reach commands -->
                                 <Setter Property="Tag"
                                         Value="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListView}}"/>
@@ -206,7 +222,7 @@
                                         <Setter Property="Background" Value="#1F1F1F"/>
                                     </Trigger>
                                     <Trigger Property="IsSelected" Value="True">
-                                        <Setter Property="Background" Value="#2A5FA0"/>
+                                        <Setter Property="Background" Value="#c0392b"/>
                                         <Setter Property="Foreground" Value="White"/>
                                     </Trigger>
                                 </Style.Triggers>
@@ -277,12 +293,28 @@
                             </ListBox.ItemsPanel>
                             <ListBox.ItemContainerStyle>
                                 <Style TargetType="ListBoxItem">
-                                    <Style.Resources>
-                                        <SolidColorBrush x:Key="{x:Static adonisUI:Brushes.AccentBrush}" Color="#2A5FA0"/>
-                                    </Style.Resources>
                                     <Setter Property="Padding" Value="0"/>
                                     <Setter Property="Margin" Value="3"/>
                                     <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <!-- Replace AdonisUI template to remove gradient highlight -->
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ListBoxItem">
+                                                <Border x:Name="Bd"
+                                                        Background="{TemplateBinding Background}"
+                                                        BorderBrush="{TemplateBinding BorderBrush}"
+                                                        BorderThickness="{TemplateBinding BorderThickness}"
+                                                        Padding="{TemplateBinding Padding}"
+                                                        SnapsToDevicePixels="True">
+                                                    <ContentPresenter
+                                                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                        VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                                        SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                                                </Border>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
                                     <Setter Property="Tag"
                                             Value="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
                                     <Setter Property="ContextMenu">
@@ -313,7 +345,7 @@
                                     </Setter>
                                     <Style.Triggers>
                                         <Trigger Property="IsSelected" Value="True">
-                                            <Setter Property="Background" Value="#2A5FA0"/>
+                                            <Setter Property="Background" Value="#c0392b"/>
                                         </Trigger>
                                     </Style.Triggers>
                                 </Style>
@@ -356,7 +388,7 @@
                     BorderBrush="#404040" BorderThickness="1"
                     MinWidth="400">
                 <StackPanel>
-                    <TextBlock Text="데이터베이스 분석 중"
+                    <TextBlock Text="Analyzing Database"
                                FontSize="15" FontWeight="SemiBold"
                                Foreground="#E8E8E8" Margin="0,0,0,8"/>
                     <TextBlock Text="{Binding StatusText}"
@@ -365,7 +397,7 @@
                     <ProgressBar Value="{Binding LoadProgress}" Maximum="100"
                                  Height="6" Width="340" HorizontalAlignment="Left"
                                  Margin="0,0,0,12"/>
-                    <TextBlock Text="처음 로드 시에만 필요합니다. 이후에는 캐시에서 즉시 로드됩니다."
+                    <TextBlock Text="Only required on first load. Subsequent starts load from cache instantly."
                                FontSize="10" Foreground="#555555"
                                TextWrapping="Wrap" MaxWidth="340"/>
                 </StackPanel>
@@ -402,7 +434,7 @@
                             Background="Transparent" BorderThickness="0"
                             VerticalAlignment="Center"
                             Foreground="{DynamicResource {x:Static adonisUI:Brushes.DisabledForegroundBrush}}"
-                            ToolTip="콘솔 접기/펼치기"/>
+                            ToolTip="Toggle console"/>
                     <TextBlock Text="CONSOLE"
                                FontSize="10" FontWeight="SemiBold"
                                Foreground="{DynamicResource {x:Static adonisUI:Brushes.DisabledForegroundBrush}}"

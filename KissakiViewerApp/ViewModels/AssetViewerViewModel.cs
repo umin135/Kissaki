@@ -49,7 +49,7 @@ public sealed partial class AssetTabItem : ObservableObject
 
     // ── Loading state ──────────────────────────────────────────────────────────
     [ObservableProperty] private bool   _isLoading  = true;
-    [ObservableProperty] private string _statusText = "로딩 중...";
+    [ObservableProperty] private string _statusText = "Loading...";
     [ObservableProperty] private bool   _isSelected;
 
     // ── Texture preview ────────────────────────────────────────────────────────
@@ -236,7 +236,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         catch (Exception ex)
         {
             AppLogger.Exception($"LoadAsset {tab.Asset?.TypeExt}", ex);
-            tab.StatusText = $"오류: {ex.Message}";
+            tab.StatusText = $"Error: {ex.Message}";
             tab.IsLoading  = false;
         }
     }
@@ -319,13 +319,13 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         await Task.Run(() =>
         {
             byte[] raw = _extractor.ExtractToMemory(rec, cont);
-            if (raw.Length == 0) { SetStatus(tab, "추출 실패"); return; }
+            if (raw.Length == 0) { SetStatus(tab, "Extraction failed"); return; }
             if (raw.Length < 8 || raw[0] != 'G' || raw[1] != 'T')
-            { SetStatus(tab, "G1T 매직 불일치"); return; }
+            { SetStatus(tab, "G1T magic mismatch"); return; }
 
             var info     = G1tDecoder.Survey(raw);
             var textures = G1tDecoder.DecodeAll(raw);
-            if (textures.Count == 0) { SetStatus(tab, "디코딩 실패"); return; }
+            if (textures.Count == 0) { SetStatus(tab, "Decode failed"); return; }
 
             var slots = new List<SlotBitmap>(textures.Count);
             foreach (var (slot, img) in textures)
@@ -348,7 +348,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
                 tab.CurrentSlotIndex = 0;
                 tab.PreviewImage     = slots[0].Bmp;
                 tab.PreviewInfo      = slots[0].Info;
-                tab.StatusText       = $"로드 완료 ({slots.Count}개 슬롯)";
+                tab.StatusText       = $"Loaded ({slots.Count} slots)";
                 tab.JsonText         = metaJson;
                 tab.VisualMode       = PreviewMode.Texture;
                 tab.PreviewMode      = PreviewMode.Texture;
@@ -385,10 +385,10 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         await Task.Run(() =>
         {
             byte[] raw = _extractor.ExtractToMemory(rec, cont);
-            if (raw.Length == 0 || raw[0] != '_' || raw[1] != 'M') { SetStatus(tab, "추출 실패"); return; }
+            if (raw.Length == 0 || raw[0] != '_' || raw[1] != 'M') { SetStatus(tab, "Extraction failed"); return; }
 
             model = G1mReader.Read(raw);
-            if (model == null) { SetStatus(tab, "G1M 파싱 실패"); return; }
+            if (model == null) { SetStatus(tab, "G1M parse failed"); return; }
             if (ct.IsCancellationRequested) return;
 
             // Resolve G1T: kidsobjdb map → co-located → proximity fallback
@@ -567,7 +567,7 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         }, ct);
 
         tab.JsonText    = json;
-        tab.StatusText  = "Metadata 로드 완료";
+        tab.StatusText  = "Metadata loaded";
         tab.PreviewMode = PreviewMode.Metadata;
         tab.IsLoading   = false;
     }

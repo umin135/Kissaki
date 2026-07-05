@@ -51,7 +51,7 @@ public static class NameDictionaryService
             foreach (var kv in names.OrderBy(x => x.Key))
                 sb.AppendLine($"0x{kv.Key:X8},{kv.Value}");
             File.WriteAllText(csvPath, sb.ToString(), Encoding.UTF8);
-            AppLogger.Info($"[NameDictionary] {names.Count}개 저장 → {csvPath}");
+            AppLogger.Info($"[NameDictionary] {names.Count} saved → {csvPath}");
         }
         catch (Exception ex) { AppLogger.Warn($"[NameDictionary] Save failed: {ex.Message}"); }
     }

@@ -98,8 +98,8 @@ public static class KidsObjDbResolver
         });
 
         AppLogger.Info(
-            $"[KidsObjDb] Phase1 완료: {dokContexts.Count}/{total} DOK 유효, " +
-            $"{dokContexts.Sum(c => c.G1mFkToKtidFk.Count)} G1M 후보");
+            $"[KidsObjDb] Phase1 done: {dokContexts.Count}/{total} DOK valid, " +
+            $"{dokContexts.Sum(c => c.G1mFkToKtidFk.Count)} G1M candidates");
 
         // ── Phase 2: extract unique KTID files globally (each at most once) ──
 
@@ -117,8 +117,8 @@ public static class KidsObjDbResolver
         });
 
         AppLogger.Info(
-            $"[KidsObjDb] Phase2 완료: {uniqueKtidFks.Count}개 KTID 처리, " +
-            $"{globalKtidSlots.Count(kv => kv.Value != null)}개 유효");
+            $"[KidsObjDb] Phase2 done: {uniqueKtidFks.Count} KTID processed, " +
+            $"{globalKtidSlots.Count(kv => kv.Value != null)} valid");
 
         // ── Phase 3: resolve G1M → G1T (CPU only, no I/O) ───────────────────
 
@@ -138,7 +138,7 @@ public static class KidsObjDbResolver
             }
         });
 
-        AppLogger.Info($"[KidsObjDb] Phase3 완료: {result.Count}개 G1M→G1T 매핑 완성");
+        AppLogger.Info($"[KidsObjDb] Phase3 done: {result.Count} G1M→G1T mappings resolved");
         return result;
     }
 
