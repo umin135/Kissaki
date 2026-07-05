@@ -477,6 +477,19 @@ public partial class AssetViewerWindow : Window
         e.Handled = true;
     }
 
+    private void GlControl_KeyDown(object sender, KeyEventArgs e)
+    {
+        _renderer?.HandleKey(e.Key, true);
+        // Suppress WPF focus navigation for arrow/tab keys
+        if (e.Key is Key.W or Key.A or Key.S or Key.D)
+            e.Handled = true;
+    }
+
+    private void GlControl_KeyUp(object sender, KeyEventArgs e)
+    {
+        _renderer?.HandleKey(e.Key, false);
+    }
+
     // ── HDR loader (kept for future skybox support) ───────────────────────────
 
     private static BitmapSource? LoadAndPrepareHdr(string path)

@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.IO;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
@@ -20,6 +22,7 @@ public sealed class GlMeshRenderer : IDisposable
     private int _meshProg;
     private int _lineProg;
     private int _outlineProg;
+    private int _gridProg;
 
     // Mesh uniforms
     private int _uMeshMvp, _uMeshModel, _uMeshTex, _uMeshHasTex, _uMeshLightDir, _uMeshAmbient;
@@ -30,34 +33,44 @@ public sealed class GlMeshRenderer : IDisposable
     // Outline uniforms
     private int _uOutlineMvp, _uOutlineScale, _uOutlineColor;
 
+    // Grid uniforms
+    private int _uGridMvp, _uGridCamPos, _uGridFadeEnd;
+
     // ── Scene geometry ─────────────────────────────────────────────────────────
-    private readonly List<SubmeshGpu> _submeshes = [];
+    private readonly List<SubmeshGpu> _submeshes   = [];
     private readonly List<LineBatch>  _boneBatches = [];
     private readonly List<LineBatch>  _axisBatches = [];
+
+    // Grid VAO (separate from LineBatches — uses grid shader)
+    private int   _gridVao, _gridVbo, _gridVertexCount;
+    private float _gridFadeEnd = 100f;
 
     // ── Pending uploads (set on UI thread, consumed on first Render after) ────
     private G1mLoadData?  _pendingLoad;
     private bool          _pendingClear;
     private BoneLoadData? _pendingBones;
 
-    // ── Camera (arcball) ──────────────────────────────────────────────────────
-    private float   _azimuth   = 0f;
-    private float   _elevation = 0.2f;
-    private float   _distance  = 2f;
-    private Vector3 _target    = Vector3.Zero;
-    private float   _minDist   = 0.01f;
-    private float   _maxDist   = 100_000f;
+    // ── FPS Camera ────────────────────────────────────────────────────────────
+    private Vector3 _camPos   = new(0f, 0.5f, 3f);
+    private float   _camYaw   = MathF.PI;   // default: looking in −Z direction
+    private float   _camPitch = -0.05f;
+    private float   _moveSpeed = 1f;
 
     // ── Mouse state ────────────────────────────────────────────────────────────
-    private bool   _leftDown, _rightDown;
-    private float  _lastMx, _lastMy;
-    private float  _orbitSensitivity = 0.007f;
-    private float  _panSensitivity   = 0.001f;
+    private bool  _leftDown;
+    private float _lastMx, _lastMy;
+    private const float LookSensitivity = 0.004f;
+
+    // ── WASD keys ──────────────────────────────────────────────────────────────
+    private readonly HashSet<Key> _keysDown = [];
+
+    // ── Frame timing ───────────────────────────────────────────────────────────
+    private readonly Stopwatch _frameClock = Stopwatch.StartNew();
 
     // ── Highlight/LOD state ────────────────────────────────────────────────────
-    private float        _shellScale = 0.01f;
-    private bool         _bonesVisible;
-    private int          _activeLodGroup = -1;  // -1 = no LOD filter
+    private float _shellScale     = 0.01f;
+    private bool  _bonesVisible;
+    private int   _activeLodGroup = -1;  // -1 = no LOD filter
 
     private bool _glInitialized;
     private bool _disposed;
@@ -114,8 +127,7 @@ public sealed class GlMeshRenderer : IDisposable
 
     public void MouseDown(bool left, float x, float y)
     {
-        if (left)  _leftDown  = true;
-        else       _rightDown = true;
+        if (left) _leftDown = true;
         _lastMx = x; _lastMy = y;
     }
 
@@ -123,55 +135,39 @@ public sealed class GlMeshRenderer : IDisposable
     {
         float dx = x - _lastMx, dy = y - _lastMy;
         _lastMx = x; _lastMy = y;
-        if (dx == 0 && dy == 0) return;
+        if (!_leftDown || (dx == 0 && dy == 0)) return;
 
-        if (_leftDown)
-        {
-            _azimuth   -= dx * _orbitSensitivity;
-            _elevation += dy * _orbitSensitivity;
-            _elevation  = Math.Clamp(_elevation, -MathF.PI * 0.49f, MathF.PI * 0.49f);
-        }
-        else if (_rightDown)
-        {
-            // Pan: move target in camera-right and camera-up
-            var right   = Vector3.Cross(LookDirection, Vector3.UnitY).Normalized();
-            var camUp   = Vector3.Cross(right, LookDirection).Normalized();
-            float scale = _distance * _panSensitivity;
-            _target -= right * dx * scale;
-            _target += camUp  * dy * scale;
-        }
+        _camYaw   += dx * LookSensitivity;
+        _camPitch -= dy * LookSensitivity;   // screen-Y down = pitch down
+        _camPitch  = Math.Clamp(_camPitch, -MathF.PI * 0.49f, MathF.PI * 0.49f);
     }
 
     public void MouseUp(bool left)
     {
-        if (left) _leftDown  = false;
-        else      _rightDown = false;
+        if (left) _leftDown = false;
     }
 
     public void MouseWheel(float delta)
     {
-        _distance *= MathF.Pow(0.9f, delta / 120f);
-        _distance  = Math.Clamp(_distance, _minDist, _maxDist);
+        // Scroll to move forward/backward
+        _camPos += GetLookDir() * (delta / 120f) * _moveSpeed;
+    }
+
+    public void HandleKey(Key key, bool down)
+    {
+        if (down) _keysDown.Add(key);
+        else      _keysDown.Remove(key);
     }
 
     // ── Camera queries (for gizmo) ─────────────────────────────────────────────
 
-    public Vector3 LookDirection
-    {
-        get
-        {
-            float cosEl = MathF.Cos(_elevation);
-            var dir = new Vector3(MathF.Sin(_azimuth) * cosEl, MathF.Sin(_elevation), MathF.Cos(_azimuth) * cosEl);
-            return -dir;  // look = target - eye direction = negate offset
-        }
-    }
+    public Vector3 LookDirection => GetLookDir();
 
     public Vector3 UpDirection
     {
         get
         {
-            // True camera-up: cross(right, look)
-            var look  = LookDirection;
+            var look  = GetLookDir();
             var right = Vector3.Cross(look, Vector3.UnitY).Normalized();
             if (right.LengthSquared < 1e-6f) right = Vector3.UnitX;
             return Vector3.Cross(right, look).Normalized();
@@ -189,23 +185,56 @@ public sealed class GlMeshRenderer : IDisposable
     {
         if (!_glInitialized) InitGl();
 
+        // ── Frame delta + WASD movement ───────────────────────────────────────
+        float dt = (float)_frameClock.Elapsed.TotalSeconds;
+        _frameClock.Restart();
+        dt = MathF.Min(dt, 0.1f);  // cap to avoid jump after pause
+
+        if (_keysDown.Count > 0)
+        {
+            var look  = GetLookDir();
+            var right = Vector3.Cross(look, Vector3.UnitY).Normalized();
+            float spd = _moveSpeed * dt;
+            if (_keysDown.Contains(Key.W)) _camPos += look  * spd;
+            if (_keysDown.Contains(Key.S)) _camPos -= look  * spd;
+            if (_keysDown.Contains(Key.A)) _camPos -= right * spd;
+            if (_keysDown.Contains(Key.D)) _camPos += right * spd;
+        }
+
         // Process pending mutations
-        if (_pendingClear)   { DoClear();          _pendingClear = false; }
-        if (_pendingLoad != null) { DoLoad(_pendingLoad); _pendingLoad  = null; }
+        if (_pendingClear)    { DoClear();          _pendingClear = false; }
+        if (_pendingLoad  != null) { DoLoad(_pendingLoad);  _pendingLoad  = null; }
         if (_pendingBones != null) { DoBones(_pendingBones); _pendingBones = null; }
 
         GL.Viewport(0, 0, fbWidth, fbHeight);
         GL.ClearColor(0.07f, 0.07f, 0.09f, 1f);
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
-        if (_submeshes.Count == 0 && _axisBatches.Count == 0) return;
-
-        var view = GetViewMatrix();
+        var view   = GetViewMatrix();
         float aspect = fbHeight > 0 ? (float)fbWidth / fbHeight : 1f;
-        var proj = Matrix4.CreatePerspectiveFieldOfView(MathHelper.DegreesToRadians(45f), aspect, 0.01f, 200_000f);
-        var vp   = view * proj;
+        var proj   = Matrix4.CreatePerspectiveFieldOfView(MathHelper.DegreesToRadians(45f), aspect, 0.001f, 200_000f);
+        var vp     = view * proj;
 
-        // World axes (behind model, rendered first)
+        // ── Ground grid (semi-transparent, before model so model renders on top)
+        if (_gridVao != 0)
+        {
+            GL.Enable(EnableCap.DepthTest);
+            GL.DepthFunc(DepthFunction.Less);
+            GL.Enable(EnableCap.Blend);
+            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+
+            GL.UseProgram(_gridProg);
+            GL.UniformMatrix4(_uGridMvp,    false, ref vp);
+            GL.Uniform3(_uGridCamPos,  _camPos);
+            GL.Uniform1(_uGridFadeEnd, _gridFadeEnd);
+            GL.BindVertexArray(_gridVao);
+            GL.DrawArrays(PrimitiveType.Lines, 0, _gridVertexCount);
+            GL.BindVertexArray(0);
+
+            GL.Disable(EnableCap.Blend);
+        }
+
+        // ── World axes ────────────────────────────────────────────────────────
         RenderLineBatches(_axisBatches, vp);
 
         // ── Mesh render: opaque pass ──────────────────────────────────────────
@@ -227,7 +256,6 @@ public sealed class GlMeshRenderer : IDisposable
         }
 
         // ── Mesh render: alpha (discard) pass ─────────────────────────────────
-        // Two-sided for hair / cloth — discard in frag shader handles per-pixel cutout.
         GL.Disable(EnableCap.CullFace);
         foreach (var sm in _submeshes)
         {
@@ -238,9 +266,9 @@ public sealed class GlMeshRenderer : IDisposable
 
         // ── Outline pass (selected submeshes) ─────────────────────────────────
         GL.UseProgram(_outlineProg);
-        GL.CullFace(TriangleFace.Front);  // show only expanded back faces
+        GL.CullFace(TriangleFace.Front);
         GL.Uniform1(_uOutlineScale, _shellScale);
-        GL.Uniform4(_uOutlineColor, new Vector4(1.0f, 0.83f, 0.0f, 1.0f)); // yellow
+        GL.Uniform4(_uOutlineColor, new Vector4(1.0f, 0.83f, 0.0f, 1.0f));
         foreach (var sm in _submeshes)
         {
             if (!sm.FinalVisible || !sm.Highlighted) continue;
@@ -276,9 +304,11 @@ public sealed class GlMeshRenderer : IDisposable
         _submeshes.Clear();
         DeleteLineBatches(_boneBatches);
         DeleteLineBatches(_axisBatches);
+        DeleteGrid();
         if (_meshProg    != 0) GL.DeleteProgram(_meshProg);
         if (_lineProg    != 0) GL.DeleteProgram(_lineProg);
         if (_outlineProg != 0) GL.DeleteProgram(_outlineProg);
+        if (_gridProg    != 0) GL.DeleteProgram(_gridProg);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -293,23 +323,32 @@ public sealed class GlMeshRenderer : IDisposable
         _meshProg    = CompileProgram(Path.Combine(shaderDir, "mesh.vert"),    Path.Combine(shaderDir, "mesh.frag"));
         _lineProg    = CompileProgram(Path.Combine(shaderDir, "line.vert"),    Path.Combine(shaderDir, "line.frag"));
         _outlineProg = CompileProgram(Path.Combine(shaderDir, "outline.vert"), Path.Combine(shaderDir, "outline.frag"));
+        _gridProg    = CompileProgram(Path.Combine(shaderDir, "grid.vert"),    Path.Combine(shaderDir, "grid.frag"));
 
-        // Cache uniform locations
-        _uMeshMvp      = GL.GetUniformLocation(_meshProg, "uMVP");
-        _uMeshModel    = GL.GetUniformLocation(_meshProg, "uModel");
-        _uMeshTex      = GL.GetUniformLocation(_meshProg, "uTex");
-        _uMeshHasTex   = GL.GetUniformLocation(_meshProg, "uHasTex");
-        _uMeshLightDir = GL.GetUniformLocation(_meshProg, "uLightDir");
-        _uMeshAmbient  = GL.GetUniformLocation(_meshProg, "uAmbient");
+        // Mesh uniforms
+        _uMeshMvp      = GL.GetUniformLocation(_meshProg,    "uMVP");
+        _uMeshModel    = GL.GetUniformLocation(_meshProg,    "uModel");
+        _uMeshTex      = GL.GetUniformLocation(_meshProg,    "uTex");
+        _uMeshHasTex   = GL.GetUniformLocation(_meshProg,    "uHasTex");
+        _uMeshLightDir = GL.GetUniformLocation(_meshProg,    "uLightDir");
+        _uMeshAmbient  = GL.GetUniformLocation(_meshProg,    "uAmbient");
 
+        // Line uniforms
         _uLineMvp   = GL.GetUniformLocation(_lineProg, "uMVP");
         _uLineColor = GL.GetUniformLocation(_lineProg, "uColor");
 
+        // Outline uniforms
         _uOutlineMvp   = GL.GetUniformLocation(_outlineProg, "uMVP");
         _uOutlineScale = GL.GetUniformLocation(_outlineProg, "uScale");
         _uOutlineColor = GL.GetUniformLocation(_outlineProg, "uOutlineColor");
 
+        // Grid uniforms
+        _uGridMvp     = GL.GetUniformLocation(_gridProg, "uMVP");
+        _uGridCamPos  = GL.GetUniformLocation(_gridProg, "uCamPos");
+        _uGridFadeEnd = GL.GetUniformLocation(_gridProg, "uFadeEnd");
+
         BuildAxisLines();
+        BuildGridLines(1.0f);   // default scale; rebuilt when model loads
     }
 
     private static int CompileProgram(string vertPath, string fragPath)
@@ -339,21 +378,62 @@ public sealed class GlMeshRenderer : IDisposable
         return id;
     }
 
-    // ── World axes (built once at init) ───────────────────────────────────────
+    // ── World axes: X (red), Z (blue) — very long for near-infinite look ──────
 
     private void BuildAxisLines()
     {
         DeleteLineBatches(_axisBatches);
         _axisBatches.Clear();
 
+        const float Len = 50_000f;
         (float[] pts, Vector4 col)[] axes =
         [
-            ([0, 0, 0,  50, 0, 0],   new Vector4(0.86f, 0.25f, 0.25f, 1f)), // X red
-            ([0, 0, 0,  0, 50, 0],   new Vector4(0.35f, 0.76f, 0.29f, 1f)), // Y green
-            ([0, 0, 0,  0, 0, 50],   new Vector4(0.24f, 0.51f, 0.86f, 1f)), // Z blue
+            ([-Len, 0f, 0f,   Len, 0f, 0f],   new Vector4(0.86f, 0.25f, 0.25f, 1f)), // X red  (좌우)
+            ([0f, 0f, -Len,   0f, 0f,  Len],   new Vector4(0.24f, 0.51f, 0.86f, 1f)), // Z blue (앞뒤)
         ];
         foreach (var (pts, col) in axes)
-            _axisBatches.Add(UploadLineBatch(pts, PrimitiveType.Lines, col, 2f));
+            _axisBatches.Add(UploadLineBatch(pts, PrimitiveType.Lines, col, 1.5f));
+    }
+
+    // ── Ground grid: XZ plane, distance-fade to look near-infinite ───────────
+
+    private void BuildGridLines(float modelSize)
+    {
+        DeleteGrid();
+
+        float step   = MathF.Max(modelSize / 5f, 0.001f);
+        float extent = step * 200f;   // 200 steps each way
+        _gridFadeEnd = extent * 0.8f;
+
+        var pts = new List<float>();
+
+        // Lines parallel to X (vary Z)
+        for (float z = -extent; z <= extent + step * 0.5f; z += step)
+            pts.AddRange([-extent, 0f, z,   extent, 0f, z]);
+
+        // Lines parallel to Z (vary X)
+        for (float x = -extent; x <= extent + step * 0.5f; x += step)
+            pts.AddRange([x, 0f, -extent,   x, 0f, extent]);
+
+        float[] arr = [.. pts];
+
+        GL.GenVertexArrays(1, out _gridVao);
+        GL.BindVertexArray(_gridVao);
+        GL.GenBuffers(1, out _gridVbo);
+        GL.BindBuffer(BufferTarget.ArrayBuffer, _gridVbo);
+        GL.BufferData(BufferTarget.ArrayBuffer, arr.Length * sizeof(float), arr, BufferUsageHint.StaticDraw);
+        GL.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), 0);
+        GL.EnableVertexAttribArray(0);
+        GL.BindVertexArray(0);
+
+        _gridVertexCount = arr.Length / 3;
+    }
+
+    private void DeleteGrid()
+    {
+        if (_gridVao != 0) { GL.DeleteVertexArray(_gridVao); _gridVao = 0; }
+        if (_gridVbo != 0) { GL.DeleteBuffer(_gridVbo);      _gridVbo = 0; }
+        _gridVertexCount = 0;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -385,7 +465,6 @@ public sealed class GlMeshRenderer : IDisposable
                 continue;
             }
 
-            // Interleaved vertex: [px, py, pz, nx, ny, nz, u, v]
             int vCount = sm.Positions.Length;
             var verts  = new float[vCount * 8];
 
@@ -405,7 +484,6 @@ public sealed class GlMeshRenderer : IDisposable
                 verts[o+6] = uv.X; verts[o+7] = uv.Y;
             }
 
-            // Upload VAO
             GL.GenVertexArrays(1, out int vao);
             GL.BindVertexArray(vao);
 
@@ -427,15 +505,12 @@ public sealed class GlMeshRenderer : IDisposable
 
             GL.BindVertexArray(0);
 
-            // Texture
             int texId = 0;
             bool hasAlpha = false;
             if (data.Textures.TryGetValue(sm.MaterialIndex, out var bmp) && bmp != null)
-            {
-                texId    = UploadTexture(bmp, out hasAlpha);
-            }
+                texId = UploadTexture(bmp, out hasAlpha);
 
-            var gpu = new SubmeshGpu
+            _submeshes.Add(new SubmeshGpu
             {
                 Vao        = vao,
                 Vbo        = vbo,
@@ -446,13 +521,12 @@ public sealed class GlMeshRenderer : IDisposable
                 IsCloth    = sm.ClothId == 1,
                 MatIdx     = sm.MaterialIndex,
                 LodGroup   = sm.LodGroup,
-                UserVisible = true,
+                UserVisible  = true,
                 FinalVisible = true,
-            };
-            _submeshes.Add(gpu);
+            });
         }
 
-        // Compute model center from first non-empty submesh or all positions
+        // Bounding box → camera placement + grid scale
         float mnX = float.MaxValue, mnY = float.MaxValue, mnZ = float.MaxValue;
         float mxX = float.MinValue, mxY = float.MinValue, mxZ = float.MinValue;
         foreach (var sm in model.Submeshes)
@@ -469,13 +543,16 @@ public sealed class GlMeshRenderer : IDisposable
         {
             float maxDim = Math.Max(Math.Max(mxX - mnX, mxY - mnY), mxZ - mnZ);
             if (maxDim < 1e-4f) maxDim = 1f;
-            _target    = new Vector3((mnX+mxX)*0.5f, (mnY+mxY)*0.5f, (mnZ+mxZ)*0.5f);
-            _distance  = maxDim * 2.0f;
-            _minDist   = maxDim * 0.01f;
-            _maxDist   = maxDim * 100f;
-            _azimuth   = 0f;
-            _elevation = 0.15f;
-            _panSensitivity = maxDim * 0.0005f;
+            var center = new Vector3((mnX+mxX)*0.5f, (mnY+mxY)*0.5f, (mnZ+mxZ)*0.5f);
+
+            // Position camera in front (+Z side), slightly above model center
+            float dist = maxDim * 2.0f;
+            _camPos    = center + new Vector3(0f, maxDim * 0.1f, dist);
+            _camYaw    = MathF.PI;   // look toward −Z (front of character)
+            _camPitch  = -0.05f;
+            _moveSpeed = maxDim * 0.5f;
+
+            BuildGridLines(maxDim);
         }
     }
 
@@ -516,7 +593,7 @@ public sealed class GlMeshRenderer : IDisposable
             _boneBatches.Add(UploadLineBatch([.. skelLinesPts], PrimitiveType.Lines,
                 new Vector4(1f, 1f, 1f, 1f), 1f));
 
-        // Skeleton joint dots (white / orange for NUNO parents)
+        // Skeleton joint dots
         var dotPts        = new List<float>();
         var nunoParentPts = new List<float>();
         for (int i = 0; i < skelCount; i++)
@@ -618,14 +695,19 @@ public sealed class GlMeshRenderer : IDisposable
     // Private — helpers
     // ══════════════════════════════════════════════════════════════════════════
 
+    private Vector3 GetLookDir()
+    {
+        float cosPitch = MathF.Cos(_camPitch);
+        return new Vector3(
+            cosPitch * MathF.Sin(_camYaw),
+            MathF.Sin(_camPitch),
+            cosPitch * MathF.Cos(_camYaw));
+    }
+
     private Matrix4 GetViewMatrix()
     {
-        float cosEl = MathF.Cos(_elevation);
-        float offset_x = MathF.Sin(_azimuth) * cosEl * _distance;
-        float offset_y = MathF.Sin(_elevation) * _distance;
-        float offset_z = MathF.Cos(_azimuth) * cosEl * _distance;
-        var eye = _target + new Vector3(offset_x, offset_y, offset_z);
-        return Matrix4.LookAt(eye, _target, Vector3.UnitY);
+        var look = GetLookDir();
+        return Matrix4.LookAt(_camPos, _camPos + look, Vector3.UnitY);
     }
 
     private void UpdateSubmeshFinalVisible(int idx)
@@ -639,7 +721,6 @@ public sealed class GlMeshRenderer : IDisposable
     {
         hasAlpha = false;
 
-        // Ensure Bgra32 format
         BitmapSource src = bmp;
         if (src.Format != PixelFormats.Bgra32)
             src = new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
@@ -649,13 +730,11 @@ public sealed class GlMeshRenderer : IDisposable
         var pixels = new byte[h * stride];
         src.CopyPixels(pixels, stride, 0);
 
-        // Detect transparency (sample every 16th pixel's alpha byte)
         for (int i = 3; i < pixels.Length && !hasAlpha; i += 64)
             if (pixels[i] < 250) hasAlpha = true;
 
         GL.GenTextures(1, out int texId);
         GL.BindTexture(TextureTarget.Texture2D, texId);
-        // GL_BGRA matches WPF Bgra32 — no byte swap needed
         GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, w, h, 0,
             OpenTK.Graphics.OpenGL4.PixelFormat.Bgra, PixelType.UnsignedByte, pixels);
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
@@ -710,9 +789,9 @@ public sealed class GlMeshRenderer : IDisposable
 
         public void Delete()
         {
-            if (Vao != 0) GL.DeleteVertexArray(Vao);
-            if (Vbo != 0) GL.DeleteBuffer(Vbo);
-            if (Ibo != 0) GL.DeleteBuffer(Ibo);
+            if (Vao   != 0) GL.DeleteVertexArray(Vao);
+            if (Vbo   != 0) GL.DeleteBuffer(Vbo);
+            if (Ibo   != 0) GL.DeleteBuffer(Ibo);
             if (TexId != 0) GL.DeleteTexture(TexId);
             Vao = Vbo = Ibo = TexId = 0;
         }

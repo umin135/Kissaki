@@ -471,7 +471,9 @@
                                  MouseDown="GlControl_MouseDown"
                                  MouseUp="GlControl_MouseUp"
                                  MouseMove="GlControl_MouseMove"
-                                 MouseWheel="GlControl_MouseWheel">
+                                 MouseWheel="GlControl_MouseWheel"
+                                 KeyDown="GlControl_KeyDown"
+                                 KeyUp="GlControl_KeyUp">
                     <gl:GLWpfControl.Style>
                         <Style TargetType="gl:GLWpfControl">
                             <Setter Property="Visibility" Value="Collapsed"/>
