@@ -29,10 +29,6 @@ Looking for a Mod Manager for Katana Engine games? → [Kashira Mod Manager](htt
 Kissaki is developed strictly for **modding and personal research purposes**.  
 You are solely responsible for any use of extracted assets. Redistribution of game assets is strictly prohibited.
 
-## License
-
-[MIT](LICENSE)
-
 ## Credits
 
 Sincere thanks to the community researchers and contributors whose work made this project possible.
@@ -68,3 +64,7 @@ Sincere thanks to the community researchers and contributors whose work made thi
 - Charsles
 - ThatGamer
 - RobCat030
+
+## License
+
+Kissaki is licensed under [GPL-3](LICENSE).
