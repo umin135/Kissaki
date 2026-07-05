@@ -4,7 +4,6 @@ using KissakiViewer.Core;
 using KissakiViewer.Core.Formats;
 using KissakiViewer.Models;
 using KissakiViewer.Services;
-using System.Reflection;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using System.Collections.ObjectModel;

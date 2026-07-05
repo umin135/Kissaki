@@ -4,18 +4,6 @@ using System.Windows.Data;
 
 namespace KissakiViewer.Converters;
 
-[ValueConversion(typeof(object), typeof(Visibility))]
-public sealed class NullToVisibilityConverter : IValueConverter
-{
-    public static readonly NullToVisibilityConverter Instance = new();
-
-    public object Convert(object? value, Type t, object p, CultureInfo c)
-        => value is null ? Visibility.Collapsed : Visibility.Visible;
-
-    public object ConvertBack(object value, Type t, object p, CultureInfo c)
-        => throw new NotImplementedException();
-}
-
 [ValueConversion(typeof(bool), typeof(bool))]
 public sealed class InvertBoolConverter : IValueConverter
 {

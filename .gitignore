@@ -10,6 +10,10 @@ x64/
 Debug/
 Release/
 
+# Distribution
+dist/
+build_release.bat
+
 # Visual Studio
 .vs/
 *.user
