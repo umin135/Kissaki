@@ -32,7 +32,7 @@ You are solely responsible for any use of extracted assets. Redistribution of ga
 ## Credits
 
 Sincere thanks to the community researchers and contributors whose work made this project possible.
-
+I developed Kissaki by referring to the following projects : 
 - DeathChaos25 ([fdata_dump](https://github.com/DeathChaos25/fdata_dump))
 - Joschuka ([Project-G1M](https://github.com/Joschuka/Project-G1M))
 - MrIkso ([RDBExplorer](https://github.com/MrIkso/RDBExplorer))
@@ -58,13 +58,7 @@ Sincere thanks to the community researchers and contributors whose work made thi
 - Luigi Auriemma ([aluigi.altervista.org](https://aluigi.altervista.org/))
 - Semory / Howfie ([Gas Machine](https://www.xnalara.org/viewtopic.php?t=1001))
 - vagonumero13 (SRSXtool)
-- ak2yny
-- PredatorCZ
-- Delguoqing
-- Charsles
-- ThatGamer
-- RobCat030
+_(Please let me know if anything has been omitted.)_
 
 ## License
-
 Kissaki is licensed under [GPL-3](LICENSE).
