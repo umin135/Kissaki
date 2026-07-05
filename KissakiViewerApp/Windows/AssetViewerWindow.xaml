@@ -6,6 +6,7 @@
         xmlns:conv="clr-namespace:KissakiViewer.Converters"
         xmlns:vm="clr-namespace:KissakiViewer.ViewModels"
         Title="Kissaki — Asset Viewer"
+        Icon="/Assets/app.ico"
         Width="1200" Height="700"
         MinWidth="600" MinHeight="400"
         Style="{DynamicResource {x:Type Window}}">

@@ -3,29 +3,42 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:adonisUI="clr-namespace:AdonisUI;assembly=AdonisUI"
         Title="Help"
-        Width="420" Height="270"
+        Icon="/Assets/app.ico"
+        Width="420" Height="290"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner"
         Style="{DynamicResource {x:Type Window}}">
 
     <StackPanel Margin="28,22">
 
-        <!-- Title + version -->
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
-            <TextBlock Text="Kissaki"
-                       FontSize="22" FontWeight="Bold"
-                       Foreground="#c0392b"
-                       VerticalAlignment="Bottom"
-                       Margin="0,0,8,0"/>
-            <TextBlock x:Name="VersionText"
-                       FontSize="11" Opacity="0.55"
-                       VerticalAlignment="Bottom" Margin="0,0,0,2"/>
-        </StackPanel>
+        <!-- Header: logo + title/subtitle -->
+        <Grid Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
 
-        <!-- Subtitle -->
-        <TextBlock Text="Katana Engine Universal Asset Viewer"
-                   FontSize="11" Opacity="0.5"
-                   Margin="0,0,0,16"/>
+            <!-- Logo -->
+            <Image Grid.Column="0" Source="/Assets/logo.png"
+                   Width="64" Height="64" Stretch="Uniform"
+                   Margin="0,0,18,0" VerticalAlignment="Center"/>
+
+            <!-- Title + version + subtitle -->
+            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <TextBlock Text="Kissaki"
+                               FontSize="22" FontWeight="Bold"
+                               Foreground="#c0392b"
+                               VerticalAlignment="Bottom"
+                               Margin="0,0,8,0"/>
+                    <TextBlock x:Name="VersionText"
+                               FontSize="11" Opacity="0.55"
+                               VerticalAlignment="Bottom" Margin="0,0,0,2"/>
+                </StackPanel>
+                <TextBlock Text="Katana Engine Universal Asset Viewer"
+                           FontSize="11" Opacity="0.5"/>
+            </StackPanel>
+        </Grid>
 
         <Separator Margin="0,0,0,14"
                    BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer1BorderBrush}}"/>

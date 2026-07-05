@@ -4,6 +4,7 @@
         xmlns:adonisUI="clr-namespace:AdonisUI;assembly=AdonisUI"
         xmlns:conv="clr-namespace:KissakiViewer.Converters"
         Title="{Binding WindowTitle}"
+        Icon="Assets/app.ico"
         Width="1280" Height="800"
         MinWidth="900" MinHeight="500"
         Style="{DynamicResource {x:Type Window}}"

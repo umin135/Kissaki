@@ -4,6 +4,7 @@
         xmlns:adonisUI="clr-namespace:AdonisUI;assembly=AdonisUI"
         xmlns:converters="clr-namespace:KissakiViewer.Converters"
         Title="Kissaki"
+        Icon="/Assets/app.ico"
         Width="640" Height="400"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen"
