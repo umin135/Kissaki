@@ -161,19 +161,18 @@ public sealed partial class AssetViewerViewModel : ObservableObject
     private readonly FdataExtractor _extractor;
     private readonly IReadOnlyDictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> _allG1tByFid;
     private readonly IReadOnlyDictionary<uint,  AssetItemViewModel>        _allAssetsByKtid;
-    // Func so that late-built kidsobjdb map (populated after asset load) is always current
-    private readonly Func<IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>>> _getG1mMap;
+    private readonly MasterDokCache?                                        _masterDokCache;
 
     public AssetViewerViewModel(
         FdataExtractor extractor,
         IReadOnlyDictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> allG1tByFid,
         IReadOnlyDictionary<uint,   AssetItemViewModel>       allAssetsByKtid,
-        Func<IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>>> getG1mMap)
+        MasterDokCache? masterDokCache)
     {
         _extractor       = extractor;
         _allG1tByFid     = allG1tByFid;
         _allAssetsByKtid = allAssetsByKtid;
-        _getG1mMap       = getG1mMap;
+        _masterDokCache  = masterDokCache;
         _tabs.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasTabs));
     }
 
@@ -366,10 +365,13 @@ public sealed partial class AssetViewerViewModel : ObservableObject
         var rec  = vm.Record;
         var cont = vm.Container;
 
-        // Priority 1: kidsobjdb mapping (most accurate — cross-container)
-        var kidsG1ts = _getG1mMap().TryGetValue(rec.FileKtid, out var mapped)
-            ? mapped.ToList()
-            : null;
+        // Priority 1: MasterDokCache (lazy, DOK-based cross-container mapping)
+        List<AssetItemViewModel>? kidsG1ts = null;
+        if (_masterDokCache != null)
+        {
+            var mapped = await _masterDokCache.GetG1tFilesAsync(rec.FileKtid);
+            kidsG1ts = mapped?.ToList();
+        }
 
         // Priority 2: co-located G1T files in same fdata container
         var colocated = _allAssetsByKtid.Values

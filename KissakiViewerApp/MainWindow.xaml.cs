@@ -78,7 +78,7 @@ public partial class MainWindow : Window
                 _vm.Extractor!,
                 _vm.AllG1tByFid,
                 _vm.AllAssetsByKtid,
-                () => _vm.G1mToG1tMap);
+                _vm.MasterDokCache);
             _viewerWindow.Owner = this;
             _viewerWindow.Show();
         }

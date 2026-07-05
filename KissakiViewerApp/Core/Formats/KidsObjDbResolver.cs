@@ -23,6 +23,7 @@ namespace KissakiViewer.Core.Formats;
 public static class KidsObjDbResolver
 {
     private const uint TypeKtidG1m       = 0x563bdef1;
+    private const uint TypeKtidG1mB      = 0xBEF563DDu; // StreamingMeshletModelData
     private const uint TypeKtidG1tA      = 0xafbec60c;
     private const uint TypeKtidG1tB      = 0xAD57EBBA;
     private const uint TypeKtidKtid      = 0x8e39aa37;
@@ -53,7 +54,7 @@ public static class KidsObjDbResolver
             IProgress<(int done, int total)>? progress = null)
     {
         var g1mMap = allAssets
-            .Where(a => a.Record.TypeKtid == TypeKtidG1m)
+            .Where(a => a.Record.TypeKtid is TypeKtidG1m or TypeKtidG1mB)
             .ToDictionary(a => a.Record.FileKtid, a => a);
 
         var g1tMap = allAssets

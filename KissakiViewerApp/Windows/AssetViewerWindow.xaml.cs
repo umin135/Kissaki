@@ -64,10 +64,10 @@ public partial class AssetViewerWindow : Window
         FdataExtractor extractor,
         IReadOnlyDictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> allG1tByFid,
         IReadOnlyDictionary<uint,   AssetItemViewModel>       allAssetsByKtid,
-        Func<IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>>> getG1mMap)
+        MasterDokCache? masterDokCache)
     {
         InitializeComponent();
-        _vm = new AssetViewerViewModel(extractor, allG1tByFid, allAssetsByKtid, getG1mMap);
+        _vm = new AssetViewerViewModel(extractor, allG1tByFid, allAssetsByKtid, masterDokCache);
         DataContext = _vm;
         _vm.PropertyChanged += OnVmPropertyChanged;
 

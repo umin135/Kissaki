@@ -26,29 +26,33 @@ public sealed class FdataExtractor
     /// <summary>Decompress asset into memory. Returns empty array on failure.</summary>
     public byte[] ExtractToMemory(AssetRecord rec, string containerName)
     {
-        if (rec.FileSize == 0) return [];
+        if (rec.FileSize == 0)
+        {
+            AppLogger.Warn($"[FData] FileSize=0: 0x{rec.FileKtid:x8} (TypeKtid=0x{rec.TypeKtid:x8})");
+            return [];
+        }
 
         string fullPath = Path.Combine(_fdataDir, containerName);
         if (!File.Exists(fullPath))
         {
-            AppLogger.Error($"fdata not found: {fullPath}");
+            AppLogger.Error($"[FData] container not found: {Path.GetFileName(fullPath)} (FK=0x{rec.FileKtid:x8}, Storage={rec.Storage})");
             return [];
         }
 
         byte[]? raw = ReadRaw(containerName, rec.FdataOffset, rec.SizeInContainer);
         if (raw is null)
         {
-            AppLogger.Error($"  → ReadRaw returned null (offset or size out of range)");
+            AppLogger.Error($"[FData] ReadRaw null: FK=0x{rec.FileKtid:x8} offset={rec.FdataOffset} size={rec.SizeInContainer}");
             return [];
         }
-        if (raw.Length < IDRK_SIZE) return [];
+        if (raw.Length < 4) return [];
 
         byte[] result = ParseAndDecompress(raw);
         if (result.Length > 0) return result;
 
-        // Fallback: some games store assets uncompressed without IDRK wrapping.
-        // If the raw block starts with a known file magic, return it directly.
-        return TryRawFallback(raw, rec.FileSize);
+        // Fallback: some assets are stored without IDRK wrapping (e.g. raw or encrypted).
+        // Return the raw block directly — the RDB-recorded FileSize is authoritative.
+        return TryRawFallback(raw, rec.FileSize, rec.TypeKtid);
     }
 
     /// <summary>
@@ -80,6 +84,8 @@ public sealed class FdataExtractor
 
     private byte[] ParseAndDecompress(byte[] raw)
     {
+        if (raw.Length < IDRK_SIZE) return [];
+
         // Verify IDRK magic
         if (raw[0] != 'I' || raw[1] != 'D' || raw[2] != 'R' || raw[3] != 'K')
         {
@@ -118,27 +124,88 @@ public sealed class FdataExtractor
         }
     }
 
-    private static byte[] TryRawFallback(byte[] raw, ulong fileSize)
+    private static byte[] TryRawFallback(byte[] raw, ulong fileSize, uint typeKtid = 0)
     {
         if (raw.Length < 4) return [];
-        if (!IsKnownAssetMagic(raw)) return [];
 
         int take = fileSize > 0 && (ulong)raw.Length >= fileSize
             ? (int)fileSize
             : raw.Length;
-        AppLogger.Info($"[FData] raw fallback: take={take} of totalLen={raw.Length}");
+        string magic = System.Text.Encoding.ASCII.GetString(raw, 0, Math.Min(4, raw.Length));
+        AppLogger.Info($"[FData] raw fallback: TK=0x{typeKtid:x8} magic=[{magic}] take={take} of {raw.Length}");
         return raw[..take];
     }
 
-    private static bool IsKnownAssetMagic(byte[] b) => b.Length >= 4 && (
-        (b[0] == 'G' && b[1] == 'T' && b[2] == '1' && b[3] == 'G') || // G1T
-        (b[0] == 'G' && b[1] == '1' && b[2] == 'M' && b[3] == '_') || // G1M
-        (b[0] == 'G' && b[1] == '1' && b[2] == 'A' && b[3] == '_') || // G1A
-        (b[0] == '_' && b[1] == 'D' && b[2] == 'O' && b[3] == 'K') || // KidsObjDb
-        (b[0] == 'A' && b[1] == 'S' && b[2] == 'R' && b[3] == 'S') || // SRSA
-        (b[0] == 'G' && b[1] == 'R' && b[2] == 'P' && b[3] == '_') || // GRP
-        (b[0] == '_' && b[1] == 'N' && b[2] == '1' && b[3] == 'G')    // G1N
-    );
+    // Large-file threshold: above this, use streaming export instead of full memory load.
+    internal const long StreamingThreshold = 256 * 1024 * 1024; // 256 MB
+
+    /// <summary>
+    /// Extracts an asset directly to <paramref name="outPath"/> without buffering the entire
+    /// content in memory. Returns the number of bytes written, or -1 on failure.
+    /// Use this for large raw assets (e.g., 1 GB SRST) where ExtractToMemory would OOM.
+    /// </summary>
+    public long ExtractToFile(AssetRecord rec, string containerName, string outPath)
+    {
+        if (rec.FileSize == 0) return -1;
+
+        string srcPath = Path.Combine(_fdataDir, containerName);
+        if (!File.Exists(srcPath)) { AppLogger.Error($"fdata not found: {srcPath}"); return -1; }
+
+        try
+        {
+            using var src  = new FileStream(srcPath,  FileMode.Open,   FileAccess.Read,  FileShare.Read);
+            using var dst  = new FileStream(outPath,  FileMode.Create, FileAccess.Write, FileShare.None);
+
+            src.Seek((long)rec.FdataOffset, SeekOrigin.Begin);
+
+            // Peek at the IDRK header
+            int headerLen = (int)Math.Min(IDRK_SIZE, (long)rec.SizeInContainer);
+            byte[] hdr    = new byte[headerLen];
+            int hdrRead   = src.ReadAtLeast(hdr, headerLen, throwOnEndOfStream: false);
+            if (hdrRead < 4) return -1;
+
+            if (hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == 'R' && hdr[3] == 'K')
+            {
+                // IDRK-wrapped: decompress in memory (these are never multi-hundred-MB in practice)
+                src.Seek((long)rec.FdataOffset, SeekOrigin.Begin);
+                byte[] buf = new byte[rec.SizeInContainer];
+                src.ReadAtLeast(buf, (int)rec.SizeInContainer, throwOnEndOfStream: false);
+                byte[] decompressed = ParseAndDecompress(buf);
+                if (decompressed.Length == 0) return -1;
+                dst.Write(decompressed);
+                AppLogger.Info($"[FData] stream-decompressed: {decompressed.Length:N0} B → {Path.GetFileName(outPath)}");
+                return decompressed.Length;
+            }
+
+            // Raw (no IDRK): stream directly — respecting FileSize as the logical end
+            long limit   = (long)(rec.FileSize > 0 ? rec.FileSize : rec.SizeInContainer);
+            byte[] chunk = new byte[64 * 1024];
+            long written = 0;
+
+            // Write the already-read header bytes first
+            int take = (int)Math.Min(hdrRead, limit);
+            dst.Write(hdr, 0, take);
+            written += take;
+
+            while (written < limit)
+            {
+                int toRead = (int)Math.Min(chunk.Length, limit - written);
+                int got    = src.Read(chunk, 0, toRead);
+                if (got == 0) break;
+                dst.Write(chunk, 0, got);
+                written += got;
+            }
+
+            AppLogger.Info($"[FData] stream-raw: {written:N0} B → {Path.GetFileName(outPath)}");
+            return written;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Exception($"[FData] ExtractToFile ({containerName} @ {rec.FdataOffset})", ex);
+            try { File.Delete(outPath); } catch { }
+            return -1;
+        }
+    }
 
     private byte[]? ReadRaw(string containerName, ulong offset, uint size)
     {
@@ -153,7 +220,11 @@ public sealed class FdataExtractor
             int read = fs.ReadAtLeast(buf, (int)size, throwOnEndOfStream: false);
             return read == (int)size ? buf : null;
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"[FData] ReadRaw exception (offset={offset}, size={size}): {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

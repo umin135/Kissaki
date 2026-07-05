@@ -9,6 +9,7 @@ public sealed partial class AssetItemViewModel : ObservableObject
     public AssetRecord Record    { get; }
     public string      KtidHex  => $"0x{Record.FileKtid:x8}";
     public string      TypeExt  => Record.TypeExt;
+    public bool        IsG1m    => Record.TypeKtid is 0x563bdef1u or 0xBEF563DDu;
     public string      Storage  => Record.Storage.ToString();
     public string      SizeStr  => FormatSize(Record.FileSize);
     public string      Container { get; }

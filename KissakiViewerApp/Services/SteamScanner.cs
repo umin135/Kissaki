@@ -7,17 +7,15 @@ namespace KissakiViewer.Services;
 public static class SteamScanner
 {
     // Known KatanaEngine games: (AppId, Display Name, exe file name)
+    // Only games confirmed to use the RDB/FDATA format (KTGL 2.x+).
+    // Atelier Ryza 1/2/3 and DOA6 (non-LR) use an older format with no root.rdb — excluded.
     private static readonly (uint AppId, string Name, string ExeName)[] s_knownGames =
     [
-        (838380,  "DEAD OR ALIVE 6",                                          "DOA6.exe"),
         (4144680, "DEAD OR ALIVE 6 Last Round",                               "DOA6LR.exe"),
         (3155730, "Venus Vacation PRISM - DEAD OR ALIVE Xtreme -",            "Venus Vacation PRISM - DEAD OR ALIVE Xtreme -.exe"),
         (1340990, "Rise of the Ronin",                                         "Ronin.exe"),
         (3123410, "Atelier Yumia: The Alchemist of Memories & the Envisioned Land",        "Atelier_Yumia.exe"),
         (3473170, "Atelier Yumia: The Alchemist of Memories & the Envisioned Land - Demo", "Atelier_Yumia.exe"),
-        (1121560, "Atelier Ryza: Ever Darkness & the Secret Hideout",         "Atelier_Ryza.exe"),
-        (1257290, "Atelier Ryza 2: Lost Legends & the Secret Fairy",          "Atelier_Ryza_2.exe"),
-        (1999770, "Atelier Ryza 3: Alchemist of the End & the Secret Key",    "Atelier_Ryza_3.exe"),
         (3920610, "FATAL FRAME II: Crimson Butterfly REMAKE",                 "FatalFrameII.exe"),
         (4226020, "FATAL FRAME II: Crimson Butterfly REMAKE DEMO",            "FatalFrameII.exe"),
         (3681010, "Nioh 3",                                                    "nioh3.exe"),

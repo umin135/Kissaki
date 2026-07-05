@@ -42,6 +42,13 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private double _loadProgress;
 
+    /// <summary>
+    /// True during first-time DOK scanning (cache miss or invalidation).
+    /// The XAML overlay blocks UI interaction while this is active.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isInitializing;
+
     [ObservableProperty]
     private ObservableCollection<string> _typeFilters = ["All"];
 
@@ -72,8 +79,7 @@ public sealed partial class MainViewModel : ObservableObject
     internal IReadOnlyDictionary<uint, AssetItemViewModel> AllAssetsByKtid =>
         _allAssetsByKtid;
 
-    internal IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>> G1mToG1tMap =>
-        _g1mToG1tMap;
+    internal MasterDokCache? MasterDokCache => _masterDokCache;
 
     // ── Private fields ────────────────────────────────────────────────────────
 
@@ -85,8 +91,16 @@ public sealed partial class MainViewModel : ObservableObject
 
     private Dictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>> _allG1tByFid = [];
     private Dictionary<uint, AssetItemViewModel>         _allAssetsByKtid = [];
-    private IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>> _g1mToG1tMap =
-        new Dictionary<uint, IReadOnlyList<AssetItemViewModel>>();
+    private MasterDokCache?                              _masterDokCache;
+    private IReadOnlyDictionary<uint, IReadOnlyList<AssetItemViewModel>>? _g1mToG1tMap;
+
+    // Companion maps: populated from cache or from MasterDokCache DM chain after warmup.
+    // Null when the game has no DM-record-containing DOK (no companion info available).
+    private IReadOnlyDictionary<uint, uint>? _cachedG1mToGrpFk;
+    private IReadOnlyDictionary<uint, uint>? _cachedG1mToOidexFk;
+
+    // RDB infos used for cache validation (actual files loaded, may be Kashira backups).
+    private List<Core.GameLoadCache.RdbInfo> _loadedRdbInfos = [];
 
     private CancellationTokenSource? _filterCts;
 
@@ -147,13 +161,36 @@ public sealed partial class MainViewModel : ObservableObject
             var r = await Task.Run(() =>
             {
                 _extractor = new FdataExtractor(fdataDir);
-                var list   = new List<AssetItemViewModel>();
+                var list     = new List<AssetItemViewModel>();
+                var rdbInfos = new List<Core.GameLoadCache.RdbInfo>();
+
+                // Check for Kashira mod-manager backup directory.
+                // If a backup copy of an RDB exists there, load the backup (original, unmodded)
+                // for the asset index while fdata files remain at their original location.
+                string kashiraBackup = Path.Combine(_profile.GameDirectory, "_Kashira", "backup");
 
                 foreach (var rdbFile in rdbFiles)
                 {
-                    string rdxFile = Path.ChangeExtension(rdbFile, ".rdx");
-                    string rdbName = Path.GetFileName(rdbFile);
-                    var    reader  = new RdbReader(rdbFile, rdxFile);
+                    string rdbName  = Path.GetFileName(rdbFile);
+                    string rdxName  = Path.ChangeExtension(rdbName, ".rdx");
+
+                    string backupRdb = Path.Combine(kashiraBackup, rdbName);
+                    string backupRdx = Path.Combine(kashiraBackup, rdxName);
+
+                    string actualRdb = File.Exists(backupRdb) ? backupRdb : rdbFile;
+                    string actualRdx = File.Exists(backupRdx)
+                        ? backupRdx
+                        : Path.ChangeExtension(rdbFile, ".rdx");
+
+                    if (actualRdb != rdbFile)
+                        AppLogger.Info($"[RDB] Kashira 백업 감지 → {rdbName} 백업본 사용");
+
+                    // Record the file that was actually used for cache invalidation.
+                    long modTicks = File.GetLastWriteTimeUtc(actualRdb).Ticks;
+                    rdbInfos.Add(new Core.GameLoadCache.RdbInfo(actualRdb, modTicks));
+
+                    var rdxFile = actualRdx;
+                    var reader  = new RdbReader(actualRdb, rdxFile);
 
                     if (!reader.Load())
                     {
@@ -164,7 +201,7 @@ public sealed partial class MainViewModel : ObservableObject
                     if (_rdb == null)
                     {
                         _rdb = reader;
-                        _primaryRdbPath = rdbFile;
+                        _primaryRdbPath = actualRdb;
                     }
 
                     foreach (var rec in reader.Entries)
@@ -188,11 +225,12 @@ public sealed partial class MainViewModel : ObservableObject
                 var ktid = new Dictionary<uint, AssetItemViewModel>(list.Count);
                 foreach (var a in list) ktid.TryAdd(a.Record.FileKtid, a);
 
-                return (List: list, G1tByFid: fid, ByKtid: ktid);
+                return (List: list, G1tByFid: fid, ByKtid: ktid, RdbInfos: rdbInfos);
             });
             batch    = r.List;
             g1tByFid = r.G1tByFid;
             byKtid   = r.ByKtid;
+            _loadedRdbInfos = r.RdbInfos;
         }
         catch (Exception ex) { err = ex.Message; }
 
@@ -201,6 +239,7 @@ public sealed partial class MainViewModel : ObservableObject
         Assets           = new ObservableCollection<AssetItemViewModel>(batch!);
         _allG1tByFid     = g1tByFid!;
         _allAssetsByKtid = byKtid!;
+        _masterDokCache  = new MasterDokCache(batch!, _extractor!);
 
         BuildTypeFilters();
         AppLogger.Info($"에셋 로드 완료: {Assets.Count:N0}개");
@@ -216,7 +255,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     /// <summary>
     /// Slow background work called from <c>MainWindow.Window_Loaded</c> after the browser is visible.
-    /// Runs name recovery, folder tree build, and G1M→G1T map construction without blocking the UI.
+    /// On first run (cache miss) shows the initialization overlay and builds the full DOK mapping,
+    /// then saves to cache. On subsequent runs loads instantly from cache.
     /// </summary>
     public async Task LoadBackgroundAsync()
     {
@@ -227,65 +267,123 @@ public sealed partial class MainViewModel : ObservableObject
         StatusText   = "이름 사전 로드 중...";
 
         await RunNameRecoveryAsync();
-        LoadProgress = 30;
+        LoadProgress = 20;
 
         await BuildFolderTreeAsync();
-        LoadProgress = 60;
+        LoadProgress = 40;
 
-        await BuildG1mMapAsync();
+        string cacheFile = Core.GameLoadCache.GetCacheFilePath(_profile.GameDirectory);
+        var    cached    = Core.GameLoadCache.TryLoad(cacheFile, _loadedRdbInfos);
+
+        if (cached != null)
+        {
+            // ── Fast path: restore mappings from cache ────────────────────────
+            StatusText = "캐시에서 G1M→G1T 매핑 로드 중...";
+
+            var combinedG1tMap = new Dictionary<uint, IReadOnlyList<AssetItemViewModel>>();
+            foreach (var (g1mFk, slots) in cached.G1mToG1tSlots)
+            {
+                int maxSlot = slots.Length > 0 ? slots.Max(s => s.Slot) : -1;
+                if (maxSlot < 0) continue;
+                var arr = new AssetItemViewModel?[maxSlot + 1];
+                int hits = 0;
+                foreach (var (slot, g1tFk) in slots)
+                    if (g1tFk != 0 && _allAssetsByKtid.TryGetValue(g1tFk, out var g1tVm))
+                    { arr[slot] = g1tVm; hits++; }
+                if (hits > 0) combinedG1tMap[g1mFk] = arr.ToList().AsReadOnly();
+            }
+            _g1mToG1tMap          = combinedG1tMap;
+            _cachedG1mToGrpFk     = cached.G1mToGrp.Count   > 0 ? cached.G1mToGrp   : null;
+            _cachedG1mToOidexFk   = cached.G1mToOidex.Count > 0 ? cached.G1mToOidex : null;
+
+            // Preload into MasterDokCache so AssetViewerViewModel also benefits.
+            _masterDokCache?.PreloadG1tResults(_g1mToG1tMap);
+
+            AppLogger.Info(
+                $"[Cache] 복원 완료: {combinedG1tMap.Count}개 G1M→G1T, " +
+                $"{cached.G1mToGrp.Count}개 GRP, {cached.G1mToOidex.Count}개 OIDEX");
+        }
+        else
+        {
+            // ── Slow path: full DOK scan — show overlay to block UI ───────────
+            IsInitializing = true;
+            StatusText     = "G1M→G1T 매핑 구축 중... (최초 로드 — 이후에는 캐시에서 즉��� 로드됩니다)";
+
+            var snapshot = Assets.ToList();
+            var ext      = _extractor;
+
+            // Run MasterDokCache (CE singleton / DM DOK search) and KidsObjDbResolver
+            // (full DOK scan, all games) in parallel.
+            var masterWarmUp = _masterDokCache?.WarmUpAsync() ?? Task.CompletedTask;
+            var resolverTask = KidsObjDbResolver.BuildAsync(
+                snapshot, ext,
+                progress: new Progress<(int done, int total)>(p =>
+                    LoadProgress = 40 + (int)(p.done / (double)Math.Max(p.total, 1) * 55)));
+
+            await Task.WhenAll(masterWarmUp, resolverTask);
+
+            // Start with KidsObjDbResolver results (covers all games)
+            var combinedMap = new Dictionary<uint, IReadOnlyList<AssetItemViewModel>>(
+                resolverTask.Result);
+
+            // Merge / override with MasterDokCache DM-chain results (higher quality when available)
+            if (_masterDokCache != null)
+            {
+                var dmMap = await _masterDokCache.GetAllG1tMappingsAsync();
+                if (dmMap != null)
+                    foreach (var (k, v) in dmMap) combinedMap[k] = v;
+            }
+
+            _g1mToG1tMap = combinedMap;
+
+            // Extract GRP/OIDEX maps for bundle export
+            if (_masterDokCache != null)
+            {
+                LoadProgress = 96;
+                StatusText   = "GRP/OIDEX 매핑 완성 중...";
+                var (grpMap, oidexMap) = await _masterDokCache.GetCompanionMapsAsync();
+                _cachedG1mToGrpFk   = grpMap;
+                _cachedG1mToOidexFk = oidexMap;
+            }
+
+            // Preload into MasterDokCache for AssetViewerViewModel
+            _masterDokCache?.PreloadG1tResults(_g1mToG1tMap);
+
+            // Save to cache
+            LoadProgress = 97;
+            StatusText   = "캐시 저장 중...";
+            try
+            {
+                var slotsForCache = combinedMap.ToDictionary(
+                    kv => kv.Key,
+                    kv => (IReadOnlyList<(int Slot, uint G1tFk)>)kv.Value
+                        .Select((vm, slot) => (slot, vm?.Record.FileKtid ?? 0u))
+                        .Where(x => x.Item2 != 0)
+                        .ToList());
+
+                Core.GameLoadCache.Save(
+                    cacheFile, _loadedRdbInfos,
+                    slotsForCache,
+                    _cachedG1mToGrpFk ?? new Dictionary<uint, uint>(),
+                    _cachedG1mToOidexFk ?? new Dictionary<uint, uint>());
+
+                AppLogger.Info($"[Cache] 저장 완료: {combinedMap.Count}개 G1M→G1T");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[Cache] 저장 실패: {ex.Message}");
+            }
+
+            IsInitializing = false;
+        }
 
         StatusText   = $"준비 완료: {Assets.Count:N0}개 에셋, {_nameMap.Count:N0}개 파일명 복구";
         IsLoading    = false;
         LoadProgress = 100;
     }
 
-    private async Task BuildG1mMapAsync()
-    {
-        if (_extractor == null) return;
-
-        string rdbPath = _primaryRdbPath;
-        string gameDir = _profile.GameDirectory;
-
-        // Move Assets.ToList() + TryLoad (JSON parse + dict build) off the UI thread.
-        var (allAssets, cached, hasCached) = await Task.Run(() =>
-        {
-            var assets = Assets.ToList();
-            bool hit   = TextureMapCache.TryLoad(gameDir, rdbPath, assets, out var c);
-            return (assets, c, hit);
-        });
-
-        if (hasCached)
-        {
-            _g1mToG1tMap = cached;
-            AppLogger.Info($"[G1mMap] 캐시 로드: {_g1mToG1tMap.Count:N0}개 G1M 연결");
-            StatusText = $"G1M→G1T 매핑 완료 (캐시, {_g1mToG1tMap.Count:N0}개)";
-            return;
-        }
-
-        StatusText   = "G1M→G1T 매핑 구축 중...";
-        _g1mToG1tMap = await KidsObjDbResolver.BuildAsync(allAssets, _extractor);
-        StatusText   = $"G1M→G1T 매핑 완료 ({_g1mToG1tMap.Count:N0}개 G1M 연결)";
-        AppLogger.Info($"[G1mMap] 구축 완료: {_g1mToG1tMap.Count:N0}개 G1M 연결");
-
-        TextureMapCache.Save(gameDir, rdbPath, _g1mToG1tMap);
-    }
-
     // ── Name recovery ─────────────────────────────────────────────────────────
 
-    /// <summary>CSV 파일을 다시 읽어 이름 사전을 갱신한다 (View 메뉴에서 수동 실행).</summary>
-    [RelayCommand]
-    private async Task ReloadNamesAsync()
-    {
-        if (Assets.Count == 0) { StatusText = "먼저 에셋을 로드하세요."; return; }
-        IsLoading    = true;
-        LoadProgress = 0;
-        await RunNameRecoveryAsync();
-        await BuildFolderTreeAsync();
-        IsLoading    = false;
-        LoadProgress = 100;
-    }
-
-    /// <summary>이름 사전 CSV 로드 — 시작 시 및 ReloadNamesCommand에서 호출.</summary>
     private async Task RunNameRecoveryAsync()
     {
         if (_extractor == null) return;
@@ -373,16 +471,23 @@ public sealed partial class MainViewModel : ObservableObject
             .ToList();
     }
 
-    private List<AssetItemViewModel> ResolveG1tFilesForModel(AssetItemViewModel vm)
+    private async Task<List<AssetItemViewModel>> ResolveG1tFilesForModelAsync(AssetItemViewModel vm)
     {
         uint   ktid    = vm.Record.FileKtid;
         string cont    = vm.Container;
         ushort fid     = vm.Record.FdataId;
         string rdbName = vm.RdbName;
 
-        // Priority 1: kidsobjdb map
-        if (_g1mToG1tMap.TryGetValue(ktid, out var mapped) && mapped.Count > 0)
-            return mapped.ToList();
+        // Priority 1: MasterDokCache — CE singleton DM-chain (DOA6 only; returns null for other games)
+        if (_masterDokCache != null)
+        {
+            var mapped = await _masterDokCache.GetG1tFilesAsync(ktid);
+            if (mapped is { Count: > 0 }) return mapped.ToList();
+        }
+
+        // Priority 1.5: KidsObjDbResolver — full DOK scan, all games
+        if (_g1mToG1tMap != null && _g1mToG1tMap.TryGetValue(ktid, out var resolved) && resolved.Count > 0)
+            return resolved.ToList();
 
         // Priority 2: co-located G1T in the same fdata container
         var colocated = _allAssetsByKtid.Values
@@ -391,9 +496,9 @@ public sealed partial class MainViewModel : ObservableObject
             .ToList();
         if (colocated.Count > 0) return colocated;
 
-        // Priority 3: nearest fdata ID within the same RDB (cross-RDB proximity is meaningless).
+        // Priority 3: nearest fdata ID within the same RDB
         if (_allG1tByFid.Count == 0) return [];
-        var nearestKey  = ((string Rdb, ushort Fid))default;
+        var nearestKey   = ((string Rdb, ushort Fid))default;
         int nearestDelta = int.MaxValue;
         foreach (var key in _allG1tByFid.Keys)
         {
@@ -408,28 +513,30 @@ public sealed partial class MainViewModel : ObservableObject
     // ── Export ────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Raw export — always names files <c>0x{hash:x8}.ext</c>.
-    /// G1M assets: exports into a subfolder and also pulls companion files
-    /// (KTID, MTL, GRP …) plus all linked G1T files.
-    /// Other assets: exports a single file into the base export directory.
+    /// Returns the export directory for a given asset.
+    /// Single:  export/&lt;GameExe&gt;/&lt;rdbName&gt;/
+    /// Bundle:  export/&lt;GameExe&gt;/&lt;rdbName&gt;/0x{ktid}/
     /// </summary>
+    private string GetExportDir(AssetItemViewModel vm, bool bundle)
+    {
+        string gameExe = Path.GetFileNameWithoutExtension(_profile.ExeName);
+        string rdbBase = Path.GetFileNameWithoutExtension(vm.RdbName);
+        string baseDir = Path.Combine(AppContext.BaseDirectory, "export", gameExe, rdbBase);
+        return bundle ? Path.Combine(baseDir, $"0x{vm.Record.FileKtid:x8}") : baseDir;
+    }
+
+    /// <summary>Single-file raw export: exports only the selected asset (any type).</summary>
     [RelayCommand]
     private async Task ExportSelectedAsync()
     {
         if (SelectedAsset is null || _extractor is null) return;
+        var vm = SelectedAsset;
 
-        var  vm    = SelectedAsset;
-        bool isG1m = vm.TypeExt == ".g1m";
+        string exportDir = GetExportDir(vm, bundle: false);
+        string name      = $"0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
 
-        string baseDir  = Path.Combine(AppContext.BaseDirectory, "export");
-        string exportDir = isG1m
-            ? Path.Combine(baseDir, $"0x{vm.Record.FileKtid:x8}")
-            : baseDir;
-
-        StatusText = $"내보내는 중... 0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
-
+        StatusText = $"내보내는 중... {name}";
         var extractor = _extractor;
-        int count = 0;
         string? err = null;
 
         await Task.Run(() =>
@@ -437,43 +544,88 @@ public sealed partial class MainViewModel : ObservableObject
             try
             {
                 Directory.CreateDirectory(exportDir);
+                string outPath = Path.Combine(exportDir, name);
 
-                if (isG1m)
+                // Use streaming extraction for large raw assets (e.g. 1 GB SRST) to avoid OOM.
+                if ((long)vm.Record.FileSize > FdataExtractor.StreamingThreshold)
                 {
-                    // Collect: G1M itself + companion files + linked G1T files
-                    var toExport = new List<AssetItemViewModel> { vm };
-                    toExport.AddRange(ResolveCompanionFiles(vm));
-                    toExport.AddRange(ResolveG1tFilesForModel(vm));
-
-                    foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))
-                    {
-                        string name   = $"0x{asset.Record.FileKtid:x8}{asset.TypeExt}";
-                        byte[] raw    = extractor.ExtractToMemory(asset.Record, asset.Container);
-                        File.WriteAllBytes(Path.Combine(exportDir, name), raw);
-                        AppLogger.Info($"[Export] {name} ({raw.Length:N0} B)");
-                        count++;
-                    }
+                    long bytes = extractor.ExtractToFile(vm.Record, vm.Container, outPath);
+                    if (bytes < 0) err = "스트리밍 추출 실패";
                 }
                 else
                 {
-                    string name = $"0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
-                    byte[] raw  = extractor.ExtractToMemory(vm.Record, vm.Container);
+                    byte[] raw = extractor.ExtractToMemory(vm.Record, vm.Container);
                     if (raw.Length == 0) { err = "빈 데이터 (추출 실패)"; return; }
-                    File.WriteAllBytes(Path.Combine(exportDir, name), raw);
+                    File.WriteAllBytes(outPath, raw);
                     AppLogger.Info($"[Export] {name} ({raw.Length:N0} B)");
-                    count = 1;
                 }
             }
-            catch (Exception ex)
-            {
-                err = ex.Message;
-                AppLogger.Error($"[Export] {ex.Message}");
-            }
+            catch (Exception ex) { err = ex.Message; AppLogger.Error($"[Export] {ex.Message}"); }
         });
 
         StatusText = err is null
-            ? $"저장 완료 → {exportDir}  ({count}개 파일)"
+            ? $"저장 완료 → {Path.Combine(exportDir, name)}"
             : $"내보내기 실패: {err}";
+    }
+
+    /// <summary>
+    /// Bundle export for G1M assets: exports the G1M + companion files (KTID, MTL, GRP …)
+    /// + all linked G1T files into a subfolder named by the G1M hash.
+    /// </summary>
+    [RelayCommand]
+    private async Task ExportBundleAsync()
+    {
+        if (SelectedAsset is null || _extractor is null || !SelectedAsset.IsG1m) return;
+        var vm = SelectedAsset;
+
+        string exportDir = GetExportDir(vm, bundle: true);
+        StatusText = $"번들 내보내는 중... 0x{vm.Record.FileKtid:x8}";
+
+        var extractor = _extractor;
+        int count  = 0;
+        string? err = null;
+
+        // Resolve G1T (always) + companion files (only when companion maps are available)
+        var g1tFiles = await ResolveG1tFilesForModelAsync(vm);
+        List<AssetItemViewModel> companions = [];
+        AssetItemViewModel? grpVm = null, oidexVm = null;
+        if (_cachedG1mToGrpFk != null)
+        {
+            companions = ResolveCompanionFiles(vm);  // KTID, MTL, GRP (fdata window)
+            uint fk = vm.Record.FileKtid;
+            if (_cachedG1mToGrpFk.TryGetValue(fk, out uint grpFk))
+                _allAssetsByKtid.TryGetValue(grpFk, out grpVm);
+            if (_cachedG1mToOidexFk != null && _cachedG1mToOidexFk.TryGetValue(fk, out uint oidexFk))
+                _allAssetsByKtid.TryGetValue(oidexFk, out oidexVm);
+        }
+
+        await Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(exportDir);
+
+                var toExport = new List<AssetItemViewModel> { vm };
+                toExport.AddRange(companions);
+                if (grpVm   != null) toExport.Add(grpVm);
+                if (oidexVm != null) toExport.Add(oidexVm);
+                toExport.AddRange(g1tFiles);
+
+                foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))
+                {
+                    string name = $"0x{asset.Record.FileKtid:x8}{asset.TypeExt}";
+                    byte[] raw  = extractor.ExtractToMemory(asset.Record, asset.Container);
+                    File.WriteAllBytes(Path.Combine(exportDir, name), raw);
+                    AppLogger.Info($"[Bundle] {name} ({raw.Length:N0} B)");
+                    count++;
+                }
+            }
+            catch (Exception ex) { err = ex.Message; AppLogger.Error($"[Bundle] {ex.Message}"); }
+        });
+
+        StatusText = err is null
+            ? $"번들 저장 완료 → {exportDir}  ({count}개 파일)"
+            : $"번들 내보내기 실패: {err}";
     }
 
     // ── Folder tree ───────────────────────────────────────────────────────────

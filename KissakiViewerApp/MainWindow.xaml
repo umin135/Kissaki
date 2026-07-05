@@ -42,10 +42,7 @@
                         <Setter Property="Foreground" Value="{DynamicResource {x:Static adonisUI:Brushes.ForegroundBrush}}"/>
                     </Style>
                 </Menu.ItemContainerStyle>
-                <MenuItem Header="View">
-                    <MenuItem Header="이름 CSV 다시 로드"
-                              Command="{Binding ReloadNamesCommand}"/>
-                </MenuItem>
+                <MenuItem Header="View"/>
                 <MenuItem Header="Settings"/>
                 <MenuItem Header="Help"/>
             </Menu>
@@ -175,9 +172,26 @@
                                     <Setter.Value>
                                         <ContextMenu>
                                             <!-- PlacementTarget = ListViewItem; .Tag = MainViewModel; .DataContext = AssetItemViewModel -->
-                                            <MenuItem Header="Export Raw"
+                                            <!-- G1M-only items -->
+                                            <MenuItem Header="Raw Export (.g1m)"
                                                       Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
-                                                                RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                                                RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      Visibility="{Binding PlacementTarget.DataContext.IsG1m,
+                                                                   RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                   Converter={StaticResource BoolToVis}}"/>
+                                            <MenuItem Header="Raw Export (Bundle)"
+                                                      Command="{Binding PlacementTarget.Tag.ExportBundleCommand,
+                                                                RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      Visibility="{Binding PlacementTarget.DataContext.IsG1m,
+                                                                   RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                   Converter={StaticResource BoolToVis}}"/>
+                                            <!-- Non-G1M item -->
+                                            <MenuItem Header="Raw Export"
+                                                      Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
+                                                                RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      Visibility="{Binding PlacementTarget.DataContext.IsG1m,
+                                                                   RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                   Converter={StaticResource InvertBoolToVis}}"/>
                                         </ContextMenu>
                                     </Setter.Value>
                                 </Setter>
@@ -265,9 +279,26 @@
                                     <Setter Property="ContextMenu">
                                         <Setter.Value>
                                             <ContextMenu>
-                                                <MenuItem Header="Export Raw"
+                                                <!-- G1M-only items -->
+                                                <MenuItem Header="Raw Export (.g1m)"
                                                           Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
-                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          Visibility="{Binding PlacementTarget.DataContext.IsG1m,
+                                                                       RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                       Converter={StaticResource BoolToVis}}"/>
+                                                <MenuItem Header="Raw Export (Bundle)"
+                                                          Command="{Binding PlacementTarget.Tag.ExportBundleCommand,
+                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          Visibility="{Binding PlacementTarget.DataContext.IsG1m,
+                                                                       RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                       Converter={StaticResource BoolToVis}}"/>
+                                                <!-- Non-G1M item -->
+                                                <MenuItem Header="Raw Export"
+                                                          Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
+                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          Visibility="{Binding PlacementTarget.DataContext.IsG1m,
+                                                                       RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                       Converter={StaticResource InvertBoolToVis}}"/>
                                             </ContextMenu>
                                         </Setter.Value>
                                     </Setter>
@@ -304,6 +335,32 @@
                     </ScrollViewer>
                 </Grid>
             </Grid>
+        </Grid>
+
+        <!-- Initialization overlay — blocks UI during first-time DOK scanning (cache miss) -->
+        <Grid Grid.Row="0" Grid.RowSpan="4"
+              Panel.ZIndex="10"
+              Visibility="{Binding IsInitializing, Converter={StaticResource BoolToVis}}">
+            <Rectangle Fill="#B4121212"/>
+            <Border HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="#1E1E1E" CornerRadius="8" Padding="32,24"
+                    BorderBrush="#404040" BorderThickness="1"
+                    MinWidth="400">
+                <StackPanel>
+                    <TextBlock Text="데이터베이스 분석 중"
+                               FontSize="15" FontWeight="SemiBold"
+                               Foreground="#E8E8E8" Margin="0,0,0,8"/>
+                    <TextBlock Text="{Binding StatusText}"
+                               FontSize="12" Foreground="#909090"
+                               Margin="0,0,0,16" TextWrapping="Wrap" MaxWidth="380"/>
+                    <ProgressBar Value="{Binding LoadProgress}" Maximum="100"
+                                 Height="6" Width="340" HorizontalAlignment="Left"
+                                 Margin="0,0,0,12"/>
+                    <TextBlock Text="처음 로드 시에만 필요합니다. 이후에는 캐시에서 즉시 로드됩니다."
+                               FontSize="10" Foreground="#555555"
+                               TextWrapping="Wrap" MaxWidth="340"/>
+                </StackPanel>
+            </Border>
         </Grid>
 
         <!-- Row 2: Console resizer splitter -->
