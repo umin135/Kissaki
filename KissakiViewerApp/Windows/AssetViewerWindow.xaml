@@ -487,6 +487,31 @@
                     </gl:GLWpfControl.Style>
                 </gl:GLWpfControl>
 
+                <!-- FPS + info text overlay (bottom-left) -->
+                <StackPanel VerticalAlignment="Bottom" HorizontalAlignment="Left"
+                            Margin="10,0,0,10"
+                            IsHitTestVisible="False"
+                            Panel.ZIndex="20">
+                    <StackPanel.Style>
+                        <Style TargetType="StackPanel">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
+                                             Value="{x:Static vm:PreviewMode.Model}">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </StackPanel.Style>
+                    <TextBlock x:Name="FpsText"
+                               Foreground="#DDFFFFFF"
+                               FontFamily="Consolas" FontSize="12"
+                               Text="FPS: --"/>
+                    <TextBlock Foreground="#88FFFFFF"
+                               FontFamily="Consolas" FontSize="11"
+                               Text="Previewed content may differ from actual in-game appearance"/>
+                </StackPanel>
+
 <!-- Axis gizmo overlay (bottom-right) -->
                 <Canvas x:Name="GizmoCanvas"
                         Width="90" Height="90"

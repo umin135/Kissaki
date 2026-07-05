@@ -98,6 +98,9 @@ public partial class AssetViewerWindow : Window
         int w = (int)Math.Max(1, GlControl.ActualWidth);
         int h = (int)Math.Max(1, GlControl.ActualHeight);
         _renderer?.Render(w, h);
+
+        if (delta.TotalSeconds > 0)
+            FpsText.Text = $"FPS: {1.0 / delta.TotalSeconds:F0}  ({delta.TotalMilliseconds:F2} ms)";
     }
 
     // ── Gizmo: update per composition frame ───────────────────────────────────
@@ -481,7 +484,7 @@ public partial class AssetViewerWindow : Window
     {
         _renderer?.HandleKey(e.Key, true);
         // Suppress WPF focus navigation for arrow/tab keys
-        if (e.Key is Key.W or Key.A or Key.S or Key.D)
+        if (e.Key is Key.W or Key.A or Key.S or Key.D or Key.Q or Key.E)
             e.Handled = true;
     }
 
