@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:adonisUI="clr-namespace:AdonisUI;assembly=AdonisUI"
-        xmlns:helix="http://helix-toolkit.org/wpf"
+        xmlns:gl="clr-namespace:OpenTK.Wpf;assembly=GLWpfControl"
         xmlns:conv="clr-namespace:KissakiViewer.Converters"
         xmlns:vm="clr-namespace:KissakiViewer.ViewModels"
         Title="Kissaki — Asset Viewer"
@@ -465,16 +465,15 @@
                     </TextBox.Style>
                 </TextBox>
 
-                <!-- 3D model viewport (PreviewMode.Model) -->
-                <helix:HelixViewport3D x:Name="Viewport3D"
-                                       Background="#111111"
-                                       ShowCoordinateSystem="False"
-                                       ShowViewCube="False"
-                                       ShowCameraTarget="False"
-                                       ZoomExtentsWhenLoaded="False"
-                                       ContextMenu="{x:Null}">
-                    <helix:HelixViewport3D.Style>
-                        <Style TargetType="helix:HelixViewport3D">
+                <!-- 3D model viewport (PreviewMode.Model) — OpenGL via GLWpfControl -->
+                <gl:GLWpfControl x:Name="GlControl"
+                                 Focusable="True"
+                                 MouseDown="GlControl_MouseDown"
+                                 MouseUp="GlControl_MouseUp"
+                                 MouseMove="GlControl_MouseMove"
+                                 MouseWheel="GlControl_MouseWheel">
+                    <gl:GLWpfControl.Style>
+                        <Style TargetType="gl:GLWpfControl">
                             <Setter Property="Visibility" Value="Collapsed"/>
                             <Style.Triggers>
                                 <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
@@ -483,41 +482,8 @@
                                 </DataTrigger>
                             </Style.Triggers>
                         </Style>
-                    </helix:HelixViewport3D.Style>
-                    <helix:DefaultLights/>
-                    <ModelVisual3D x:Name="SkyboxRoot"/>
-                    <helix:GridLinesVisual3D x:Name="GridViz"
-                                             Width="400" Length="400"
-                                             Thickness="0.5"
-                                             MinorDistance="10"
-                                             MajorDistance="50"
-                                             Fill="#FF606060"/>
-                    <ModelVisual3D x:Name="AxesRoot"/>
-                    <ModelVisual3D x:Name="SceneRoot"/>
-                </helix:HelixViewport3D>
-
-                <!-- Bone X-ray overlay: own depth buffer → bones always in front of mesh -->
-                <Viewport3D x:Name="BoneOverlayVP"
-                            IsHitTestVisible="False"
-                            Panel.ZIndex="1">
-                    <Viewport3D.Style>
-                        <Style TargetType="Viewport3D">
-                            <Setter Property="Visibility" Value="Collapsed"/>
-                            <Style.Triggers>
-                                <DataTrigger Binding="{Binding SelectedTab.PreviewMode}"
-                                             Value="{x:Static vm:PreviewMode.Model}">
-                                    <Setter Property="Visibility" Value="Visible"/>
-                                </DataTrigger>
-                            </Style.Triggers>
-                        </Style>
-                    </Viewport3D.Style>
-                    <ModelVisual3D>
-                        <ModelVisual3D.Content>
-                            <AmbientLight Color="White"/>
-                        </ModelVisual3D.Content>
-                    </ModelVisual3D>
-                    <ModelVisual3D x:Name="BoneRoot"/>
-                </Viewport3D>
+                    </gl:GLWpfControl.Style>
+                </gl:GLWpfControl>
 
 <!-- Axis gizmo overlay (bottom-right) -->
                 <Canvas x:Name="GizmoCanvas"
