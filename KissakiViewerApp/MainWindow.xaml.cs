@@ -1,5 +1,8 @@
+using System.Collections;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using KissakiViewer.Models;
 using KissakiViewer.ViewModels;
@@ -12,6 +15,19 @@ public partial class MainWindow : Window
     private readonly MainViewModel _vm;
     private AssetViewerWindow? _viewerWindow;
     private double _savedConsoleHeight = 160;
+
+    // Column sort state
+    private static readonly Dictionary<string, string> ColSortProp = new()
+    {
+        ["Name"]      = "DisplayName",
+        ["Hash"]      = "KtidHex",
+        ["Type"]      = "TypeExt",
+        ["Container"] = "Container",
+        ["Size"]      = "FileSize",
+    };
+    private GridViewColumnHeader? _lastSortHeader;
+    private string?               _lastSortProp;
+    private ListSortDirection     _sortDir = ListSortDirection.Ascending;
 
     public MainWindow(MainViewModel vm)
     {
@@ -29,6 +45,13 @@ public partial class MainWindow : Window
             foreach (var item in args.NewItems)
                 ConsoleTextBox.AppendText((string)item + "\n");
             ConsoleTextBox.ScrollToEnd();
+        };
+
+        // Re-apply sort when FilteredAssets is replaced by search/filter
+        _vm.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(MainViewModel.FilteredAssets) && _lastSortProp != null)
+                ApplySort(AssetListView.ItemsSource, _lastSortProp, _sortDir);
         };
 
         // Phase 1 — fast: parse RDB and populate the asset list.
@@ -85,6 +108,45 @@ public partial class MainWindow : Window
 
         _viewerWindow.OpenAsset(asset);
         _viewerWindow.Activate();
+    }
+
+    private void AssetListView_ColumnHeaderClick(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is not GridViewColumnHeader { Column: not null } header) return;
+
+        // Strip any existing arrow to get the base label
+        string label = (header.Content?.ToString() ?? "").TrimEnd().TrimEnd('↑', '↓').TrimEnd();
+        if (!ColSortProp.TryGetValue(label, out string? prop)) return;
+
+        if (_lastSortHeader == header)
+        {
+            _sortDir = _sortDir == ListSortDirection.Ascending
+                ? ListSortDirection.Descending
+                : ListSortDirection.Ascending;
+        }
+        else
+        {
+            // Restore previous header to plain label
+            if (_lastSortHeader != null)
+            {
+                string prev = (_lastSortHeader.Content?.ToString() ?? "").TrimEnd().TrimEnd('↑', '↓').TrimEnd();
+                _lastSortHeader.Content = prev;
+            }
+            _lastSortHeader = header;
+            _lastSortProp   = prop;
+            _sortDir        = ListSortDirection.Ascending;
+        }
+
+        header.Content = label + (_sortDir == ListSortDirection.Ascending ? "  ↑" : "  ↓");
+        ApplySort(AssetListView.ItemsSource, prop, _sortDir);
+    }
+
+    private static void ApplySort(IEnumerable? source, string prop, ListSortDirection dir)
+    {
+        if (source == null) return;
+        var view = CollectionViewSource.GetDefaultView(source);
+        view.SortDescriptions.Clear();
+        view.SortDescriptions.Add(new SortDescription(prop, dir));
     }
 
     private void Settings_Click(object sender, RoutedEventArgs e)

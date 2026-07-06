@@ -435,8 +435,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     /// <summary>
     /// Finds companion files (KTID, MTL, GRP, …) for a G1M by scanning the same fdata container.
-    /// Collects all companion-typed assets whose fdata offset falls between the nearest preceding
-    /// G1M and this G1M — skipping over any non-companion intermediary types without stopping.
+    /// Collects all companion-typed assets whose fdata offset falls between this G1M and the next
+    /// G1M — skipping over any non-companion intermediary types without stopping.
+    /// DOA6 fdata layout: [G1M] → [KTID] → [MTL] → … → [next G1M]
     /// </summary>
     private List<AssetItemViewModel> ResolveCompanionFiles(AssetItemViewModel vm)
     {
@@ -450,24 +451,24 @@ public sealed partial class MainViewModel : ObservableObject
 
         ulong g1mOffset = vm.Record.FdataOffset;
 
-        // Lower bound: the previous G1M's offset (exclusive).
-        // Prevents picking up companions that belong to an earlier bundle.
-        ulong lowerBound = 0;
-        for (int i = g1mIdx - 1; i >= 0; i--)
+        // Upper bound: the next G1M's offset (exclusive).
+        // Prevents picking up companions that belong to a later bundle.
+        ulong upperBound = ulong.MaxValue;
+        for (int i = g1mIdx + 1; i < inSameFdata.Count; i++)
         {
             if (s_g1mTypeKtids.Contains(inSameFdata[i].Record.TypeKtid))
             {
-                lowerBound = inSameFdata[i].Record.FdataOffset;
+                upperBound = inSameFdata[i].Record.FdataOffset;
                 break;
             }
         }
 
-        // Collect every companion-typed asset between the previous G1M and this G1M.
+        // Collect every companion-typed asset between this G1M and the next G1M.
         // Non-companion intermediary files (g1co, rigbin, xf1g …) are simply skipped.
         return inSameFdata
             .Where(a => s_g1mCompanionTypeKtids.Contains(a.Record.TypeKtid)
-                     && a.Record.FdataOffset >  lowerBound
-                     && a.Record.FdataOffset <  g1mOffset)
+                     && a.Record.FdataOffset >  g1mOffset
+                     && a.Record.FdataOffset <  upperBound)
             .ToList();
     }
 
@@ -518,9 +519,15 @@ public sealed partial class MainViewModel : ObservableObject
     /// Bundle:  export/&lt;GameExe&gt;/&lt;rdbName&gt;/0x{ktid}/
     /// </summary>
     private static string ExportFileName(AssetItemViewModel vm)
-        => AppSettingsService.Current.UseRestoredName && vm.RecoveredName != null
-            ? vm.DisplayFileName
-            : $"0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
+    {
+        if (!AppSettingsService.Current.UseRestoredName || vm.RecoveredName is null)
+            return $"0x{vm.Record.FileKtid:x8}{vm.TypeExt}";
+        string dispName = vm.DisplayName;
+        string baseName = string.Equals(Path.GetExtension(dispName), vm.TypeExt, StringComparison.OrdinalIgnoreCase)
+            ? Path.GetFileNameWithoutExtension(dispName)
+            : dispName;
+        return baseName + vm.TypeExt;
+    }
 
     private string GetExportDir(AssetItemViewModel vm, bool bundle)
     {

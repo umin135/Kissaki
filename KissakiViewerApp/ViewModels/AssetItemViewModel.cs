@@ -11,6 +11,7 @@ public sealed partial class AssetItemViewModel : ObservableObject
     public string      TypeExt  => Record.TypeExt;
     public bool        IsG1m    => Record.TypeKtid is 0x563bdef1u or 0xBEF563DDu;
     public string      Storage  => Record.Storage.ToString();
+    public ulong       FileSize => Record.FileSize;
     public string      SizeStr  => FormatSize(Record.FileSize);
     public string      Container { get; }
     /// <summary>Source RDB filename (e.g. "root.rdb", "system.rdb"). Used as top-level folder in the tree.</summary>

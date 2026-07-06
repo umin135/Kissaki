@@ -161,6 +161,7 @@
                               VirtualizingPanel.VirtualizationMode="Recycling"
                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
                               MouseDoubleClick="AssetList_MouseDoubleClick"
+                              GridViewColumnHeader.Click="AssetListView_ColumnHeaderClick"
                               Visibility="{Binding IsGridView, Converter={StaticResource InvertBoolToVis}}">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">
