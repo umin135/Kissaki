@@ -47,10 +47,14 @@ public partial class MainWindow : Window
             ConsoleTextBox.ScrollToEnd();
         };
 
-        // Re-apply sort when FilteredAssets is replaced by search/filter
+        // Re-apply sort when FilteredAssets is replaced by search/filter.
+        // Skip during full game load (IsLoading=true) to avoid sorting 140K+ items
+        // synchronously via ListCollectionView.PrepareLocalArray.
         _vm.PropertyChanged += (_, args) =>
         {
-            if (args.PropertyName == nameof(MainViewModel.FilteredAssets) && _lastSortProp != null)
+            if (args.PropertyName == nameof(MainViewModel.FilteredAssets)
+                && _lastSortProp != null
+                && !_vm.IsLoading)
                 ApplySort(AssetListView.ItemsSource, _lastSortProp, _sortDir);
         };
 

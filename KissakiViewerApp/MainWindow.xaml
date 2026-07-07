@@ -277,11 +277,14 @@
                         </ListView.View>
                     </ListView>
 
-                    <!-- Grid view -->
+                    <!-- Grid view: ItemsSource NOT bound here — WPF processes ItemsSource bindings
+                         even on Collapsed elements (ItemsControl.OnItemsSourceChanged fires
+                         synchronously), which caused a ~7 s UI-thread freeze on every game load
+                         when the 174K-item OC was assigned.  Bind lazily when IsGridView=true. -->
                     <ScrollViewer VerticalScrollBarVisibility="Auto"
                                   HorizontalScrollBarVisibility="Disabled"
                                   Visibility="{Binding IsGridView, Converter={StaticResource BoolToVis}}">
-                        <ListBox ItemsSource="{Binding FilteredAssets}"
+                        <ListBox x:Name="AssetGridBox"
                                  SelectedItem="{Binding SelectedAsset}"
                                  BorderThickness="0"
                                  Background="Transparent"

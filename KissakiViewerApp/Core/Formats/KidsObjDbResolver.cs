@@ -75,6 +75,8 @@ public static class KidsObjDbResolver
         int done  = 0;
         int total = kobjList.Count;
 
+        AppLogger.Info($"[KidsObjDb] Phase1 starting: {total} kidsobjdb files, {g1mMap.Count} G1M, {g1tMap.Count} G1T, {ktidMap.Count} KTID");
+
         await Parallel.ForEachAsync(kobjList, async (kobj, ct) =>
         {
             await Task.Run(() =>

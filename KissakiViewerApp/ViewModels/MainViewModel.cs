@@ -151,16 +151,17 @@ public sealed partial class MainViewModel : ObservableObject
             ? $"Parsing {Path.GetFileName(rdbFiles[0])}..."
             : $"Parsing RDB files... ({rdbFiles.Length} files)";
 
-        List<AssetItemViewModel>?                                          batch    = null;
-        Dictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>>?   g1tByFid = null;
-        Dictionary<uint, AssetItemViewModel>?                              byKtid   = null;
+        ObservableCollection<AssetItemViewModel>?                          loadedAssets = null;
+        Dictionary<(string Rdb, ushort Fid), List<AssetItemViewModel>>?   g1tByFid     = null;
+        Dictionary<uint, AssetItemViewModel>?                              byKtid       = null;
         string? err = null;
 
         try
         {
             var r = await Task.Run(() =>
             {
-                _extractor = new FdataExtractor(fdataDir);
+                var extractor = new FdataExtractor(fdataDir);
+                _extractor = extractor;
                 var list     = new List<AssetItemViewModel>();
                 var rdbInfos = new List<Core.GameLoadCache.RdbInfo>();
 
@@ -225,30 +226,32 @@ public sealed partial class MainViewModel : ObservableObject
                 var ktid = new Dictionary<uint, AssetItemViewModel>(list.Count);
                 foreach (var a in list) ktid.TryAdd(a.Record.FileKtid, a);
 
-                return (List: list, G1tByFid: fid, ByKtid: ktid, RdbInfos: rdbInfos);
+                var masterDok = new MasterDokCache(list, extractor);
+
+                var assets = new ObservableCollection<AssetItemViewModel>(list);
+
+                return (Assets: assets, G1tByFid: fid, ByKtid: ktid, RdbInfos: rdbInfos,
+                        MasterDok: masterDok);
             });
-            batch    = r.List;
-            g1tByFid = r.G1tByFid;
-            byKtid   = r.ByKtid;
+            loadedAssets    = r.Assets;
+            g1tByFid        = r.G1tByFid;
+            byKtid          = r.ByKtid;
             _loadedRdbInfos = r.RdbInfos;
+            _masterDokCache = r.MasterDok;
         }
         catch (Exception ex) { err = ex.Message; }
 
         if (err != null) { StatusText = $"Error: {err}"; IsLoading = false; return; }
 
-        Assets           = new ObservableCollection<AssetItemViewModel>(batch!);
+        Assets           = loadedAssets!;
         _allG1tByFid     = g1tByFid!;
         _allAssetsByKtid = byKtid!;
-        _masterDokCache  = new MasterDokCache(batch!, _extractor!);
 
         BuildTypeFilters();
         AppLogger.Info($"Assets loaded: {Assets.Count:N0}");
 
-        // Share the same collection as the initial filtered view (no filter is active yet).
-        // ApplyFilterAsync will replace FilteredAssets with a new OC when a filter is applied.
         FilteredAssets = Assets;
-        StatusText     = $"{batch!.Count:N0} assets";
-
+        StatusText   = $"{Assets.Count:N0} assets";
         IsLoading    = false;
         LoadProgress = 100;
     }
@@ -260,6 +263,7 @@ public sealed partial class MainViewModel : ObservableObject
     /// </summary>
     public async Task LoadBackgroundAsync()
     {
+        AppLogger.Info($"[LoadBG] Starting (extractor={_extractor != null})");
         if (_extractor == null) return;
 
         IsLoading    = true;
@@ -269,8 +273,10 @@ public sealed partial class MainViewModel : ObservableObject
         await RunNameRecoveryAsync();
         LoadProgress = 20;
 
+        AppLogger.Info("[LoadBG] Building folder tree...");
         await BuildFolderTreeAsync();
         LoadProgress = 40;
+        AppLogger.Info("[LoadBG] Folder tree built. Checking cache...");
 
         string cacheFile = Core.GameLoadCache.GetCacheFilePath(_profile.GameDirectory);
         var    cached    = Core.GameLoadCache.TryLoad(cacheFile, _loadedRdbInfos);
@@ -307,74 +313,83 @@ public sealed partial class MainViewModel : ObservableObject
         {
             // ── Slow path: full DOK scan — show overlay to block UI ───────────
             IsInitializing = true;
-            StatusText     = "Building G1M→G1T map... (first load — subsequent starts use cache)";
-
-            var snapshot = Assets.ToList();
-            var ext      = _extractor;
-
-            // Run MasterDokCache (CE singleton / DM DOK search) and KidsObjDbResolver
-            // (full DOK scan, all games) in parallel.
-            var masterWarmUp = _masterDokCache?.WarmUpAsync() ?? Task.CompletedTask;
-            var resolverTask = KidsObjDbResolver.BuildAsync(
-                snapshot, ext,
-                progress: new Progress<(int done, int total)>(p =>
-                    LoadProgress = 40 + (int)(p.done / (double)Math.Max(p.total, 1) * 55)));
-
-            await Task.WhenAll(masterWarmUp, resolverTask);
-
-            // Start with KidsObjDbResolver results (covers all games)
-            var combinedMap = new Dictionary<uint, IReadOnlyList<AssetItemViewModel>>(
-                resolverTask.Result);
-
-            // Merge / override with MasterDokCache DM-chain results (higher quality when available)
-            if (_masterDokCache != null)
-            {
-                var dmMap = await _masterDokCache.GetAllG1tMappingsAsync();
-                if (dmMap != null)
-                    foreach (var (k, v) in dmMap) combinedMap[k] = v;
-            }
-
-            _g1mToG1tMap = combinedMap;
-
-            // Extract GRP/OIDEX maps for bundle export
-            if (_masterDokCache != null)
-            {
-                LoadProgress = 96;
-                StatusText   = "Building GRP/OIDEX maps...";
-                var (grpMap, oidexMap) = await _masterDokCache.GetCompanionMapsAsync();
-                _cachedG1mToGrpFk   = grpMap;
-                _cachedG1mToOidexFk = oidexMap;
-            }
-
-            // Preload into MasterDokCache for AssetViewerViewModel
-            _masterDokCache?.PreloadG1tResults(_g1mToG1tMap);
-
-            // Save to cache
-            LoadProgress = 97;
-            StatusText   = "Saving cache...";
             try
             {
-                var slotsForCache = combinedMap.ToDictionary(
-                    kv => kv.Key,
-                    kv => (IReadOnlyList<(int Slot, uint G1tFk)>)kv.Value
-                        .Select((vm, slot) => (slot, vm?.Record.FileKtid ?? 0u))
-                        .Where(x => x.Item2 != 0)
-                        .ToList());
+                StatusText = "Building G1M→G1T map... (first load — subsequent starts use cache)";
 
-                Core.GameLoadCache.Save(
-                    cacheFile, _loadedRdbInfos,
-                    slotsForCache,
-                    _cachedG1mToGrpFk ?? new Dictionary<uint, uint>(),
-                    _cachedG1mToOidexFk ?? new Dictionary<uint, uint>());
+                var snapshot = Assets.ToList();
+                var ext      = _extractor;
 
-                AppLogger.Info($"[Cache] Saved: {combinedMap.Count} G1M→G1T entries");
+                // Run MasterDokCache (CE singleton / DM DOK search) and KidsObjDbResolver
+                // (full DOK scan, all games) in parallel.
+                var masterWarmUp = _masterDokCache?.WarmUpAsync() ?? Task.CompletedTask;
+                var resolverTask = KidsObjDbResolver.BuildAsync(
+                    snapshot, ext,
+                    progress: new Progress<(int done, int total)>(p =>
+                        LoadProgress = 40 + (int)(p.done / (double)Math.Max(p.total, 1) * 55)));
+
+                await Task.WhenAll(masterWarmUp, resolverTask);
+
+                // Start with KidsObjDbResolver results (covers all games)
+                var combinedMap = new Dictionary<uint, IReadOnlyList<AssetItemViewModel>>(
+                    resolverTask.Result);
+
+                // Merge / override with MasterDokCache DM-chain results (higher quality when available)
+                if (_masterDokCache != null)
+                {
+                    var dmMap = await _masterDokCache.GetAllG1tMappingsAsync();
+                    if (dmMap != null)
+                        foreach (var (k, v) in dmMap) combinedMap[k] = v;
+                }
+
+                _g1mToG1tMap = combinedMap;
+
+                // Extract GRP/OIDEX maps for bundle export
+                if (_masterDokCache != null)
+                {
+                    LoadProgress = 96;
+                    StatusText   = "Building GRP/OIDEX maps...";
+                    var (grpMap, oidexMap) = await _masterDokCache.GetCompanionMapsAsync();
+                    _cachedG1mToGrpFk   = grpMap;
+                    _cachedG1mToOidexFk = oidexMap;
+                }
+
+                // Preload into MasterDokCache for AssetViewerViewModel
+                _masterDokCache?.PreloadG1tResults(_g1mToG1tMap);
+
+                // Save to cache
+                LoadProgress = 97;
+                StatusText   = "Saving cache...";
+                try
+                {
+                    var slotsForCache = combinedMap.ToDictionary(
+                        kv => kv.Key,
+                        kv => (IReadOnlyList<(int Slot, uint G1tFk)>)kv.Value
+                            .Select((vm, slot) => (slot, vm?.Record.FileKtid ?? 0u))
+                            .Where(x => x.Item2 != 0)
+                            .ToList());
+
+                    Core.GameLoadCache.Save(
+                        cacheFile, _loadedRdbInfos,
+                        slotsForCache,
+                        _cachedG1mToGrpFk ?? new Dictionary<uint, uint>(),
+                        _cachedG1mToOidexFk ?? new Dictionary<uint, uint>());
+
+                    AppLogger.Info($"[Cache] Saved: {combinedMap.Count} G1M→G1T entries");
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Warn($"[Cache] Save failed: {ex.Message}");
+                }
             }
             catch (Exception ex)
             {
-                AppLogger.Warn($"[Cache] Save failed: {ex.Message}");
+                AppLogger.Error($"[LoadBG] Slow path failed: {ex.GetType().Name}: {ex.Message}");
             }
-
-            IsInitializing = false;
+            finally
+            {
+                IsInitializing = false;
+            }
         }
 
         StatusText   = $"Ready: {Assets.Count:N0} assets, {_nameMap.Count:N0} names recovered";
@@ -388,7 +403,9 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (_extractor == null) return;
 
+        AppLogger.Info("[NameRecovery] Getting AppId...");
         string appId   = AppIdService.GetAppId(_profile.GameDirectory);
+        AppLogger.Info($"[NameRecovery] AppId={appId}, checking CSV...");
         string csvPath = NameDictionaryService.GetCsvPath(appId);
 
         Dictionary<uint, string> names;
@@ -662,10 +679,13 @@ public sealed partial class MainViewModel : ObservableObject
 
     private async Task BuildFolderTreeAsync()
     {
+        AppLogger.Info($"[FolderTree] 0: entering, Assets.Count={Assets.Count}");
         var assets = Assets.ToList();
+        AppLogger.Info($"[FolderTree] 1: ToList done ({assets.Count}), queuing Task.Run");
 
         var r = await Task.Run(() =>
         {
+            AppLogger.Info("[FolderTree] 2: Task.Run started");
             var nodeMap  = new Dictionary<string, FolderNode>(StringComparer.OrdinalIgnoreCase);
             var rootList = new List<FolderNode>();
 
@@ -677,6 +697,7 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             int unkCount = assets.Count(a => string.IsNullOrEmpty(GetEffectiveFolderPath(a)));
+            AppLogger.Info($"[FolderTree] 3: loop done — {rootList.Count} roots, {nodeMap.Count} nodes, {unkCount} unknown");
 
             rootList.Sort((a, b) =>
             {
@@ -688,17 +709,20 @@ public sealed partial class MainViewModel : ObservableObject
             });
             foreach (var root in rootList) SortChildrenRecursive(root);
 
+            AppLogger.Info("[FolderTree] 4: Task.Run done");
             return (Roots: rootList, UnknownCount: unkCount);
         });
 
+        AppLogger.Info($"[FolderTree] 5: continuation on UI thread, unknownCount={r.UnknownCount}");
         if (r.UnknownCount > 0)
         {
             var unknown = new FolderNode("Unknown", string.Empty, isUnknown: true) { AssetCount = r.UnknownCount };
             r.Roots.Add(unknown);
         }
 
-        FolderTree         = new ObservableCollection<FolderNode>(r.Roots);
-        SelectedFolderNode ??= r.Roots.FirstOrDefault();
+        FolderTree = new ObservableCollection<FolderNode>(r.Roots);
+        AppLogger.Info($"[FolderTree] 6: FolderTree set ({r.Roots.Count} roots)");
+        AppLogger.Info("[FolderTree] 7: done");
     }
 
     private static FolderNode EnsurePath(string path,
@@ -749,6 +773,19 @@ public sealed partial class MainViewModel : ObservableObject
         string type   = SelectedTypeFilter;
         var    folder = SelectedFolderNode;
         var    assets = Assets;          // stable reference — not modified after LoadAsync
+
+        // Fast path: no filter active — reuse Assets directly, no new OC or List allocation.
+        // This avoids the ~1.4 MB LOH allocation (List<> + OC<> backing array) that would
+        // otherwise trigger a Gen2 GC pause and block the WPF dispatcher.
+        if (string.IsNullOrEmpty(text) && type == "All" && folder == null)
+        {
+            if (!ct.IsCancellationRequested)
+            {
+                FilteredAssets = assets;
+                StatusText = $"{assets.Count:N0} assets";
+            }
+            return;
+        }
 
         List<AssetItemViewModel> filtered;
         try

@@ -67,15 +67,37 @@ public sealed class MasterDokCache
         FdataExtractor extractor)
     {
         _extractor = extractor;
-        _g1mMap  = allAssets.Where(a => a.Record.TypeKtid is TypeKtidG1m or TypeKtidG1mB)
-                             .ToDictionary(a => a.Record.FileKtid, a => a);
-        _g1tMap  = allAssets.Where(a => a.Record.TypeKtid is TypeKtidG1tA or TypeKtidG1tB)
-                             .ToDictionary(a => a.Record.FileKtid, a => a);
-        _ktidMap = allAssets.Where(a => a.Record.TypeKtid == TypeKtidKtid)
-                             .ToDictionary(a => a.Record.FileKtid, a => a);
-        _dokList = allAssets.Where(a => a.Record.TypeKtid == TypeKtidDok)
-                             .OrderByDescending(a => a.Record.SizeInContainer)
-                             .ToList();
+
+        // Pre-count each bucket to avoid Dictionary resize churn on large lists.
+        // Without capacity hints, ToDictionary() repeatedly doubles its internal LOH array
+        // (allocates and discards ~5-8 MB of temporary arrays for 100K+ asset lists).
+        var g1mList  = new List<AssetItemViewModel>();
+        var g1tList  = new List<AssetItemViewModel>();
+        var ktidList = new List<AssetItemViewModel>();
+        var dokList  = new List<AssetItemViewModel>();
+
+        foreach (var a in allAssets)
+        {
+            switch (a.Record.TypeKtid)
+            {
+                case TypeKtidG1m or TypeKtidG1mB: g1mList.Add(a);  break;
+                case TypeKtidG1tA or TypeKtidG1tB: g1tList.Add(a); break;
+                case TypeKtidKtid:                 ktidList.Add(a); break;
+                case TypeKtidDok:                  dokList.Add(a);  break;
+            }
+        }
+
+        _g1mMap  = new Dictionary<uint, AssetItemViewModel>(g1mList.Count);
+        foreach (var a in g1mList)  _g1mMap.TryAdd(a.Record.FileKtid, a);
+
+        _g1tMap  = new Dictionary<uint, AssetItemViewModel>(g1tList.Count);
+        foreach (var a in g1tList)  _g1tMap.TryAdd(a.Record.FileKtid, a);
+
+        _ktidMap = new Dictionary<uint, AssetItemViewModel>(ktidList.Count);
+        foreach (var a in ktidList) _ktidMap.TryAdd(a.Record.FileKtid, a);
+
+        dokList.Sort((a, b) => b.Record.SizeInContainer.CompareTo(a.Record.SizeInContainer));
+        _dokList = dokList;
 
         // Full by-ktid lookup needed to resolve GRP/OIDEX by FileKtid
         var all = new Dictionary<uint, AssetItemViewModel>(allAssets.Count);
