@@ -66,8 +66,8 @@ public static class KtidExtension
         [0x8725D306] = ".g1fpose",    // G1FPose
         // ── Identified via probe (DOA6LR — previously unknown) ────────────────
         [0xF20DE437] = ".effselect",  // eff_select table (249 files)
-        [0x133D2C3B] = ".unk_133d",   // KTID hash list inside G1M bundles
-        [0x757347E0] = ".unk_757347", // Unidentified (2 files only)
+        [0x133D2C3B] = ".sid",         // SID — confirmed via name CSV (e.g. ARD_COS_001_0001.sid)
+        [0x757347E0] = ".bpo",         // BPO — confirmed via name CSV (e.g. FE4_S0899LOS.bpo)
     };
 
     public static string Get(uint typeKtid) =>

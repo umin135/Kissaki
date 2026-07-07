@@ -8,6 +8,7 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Media.Imaging;
 
@@ -450,6 +451,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     private static readonly HashSet<uint> s_g1mTypeKtids = [0x563bdef1u, 0xBEF563DDu];
 
+    // G1M_fk - OidDelta == OID_fk  (verified 100% across DOA6LR + FF2, fk arithmetic)
+    private const uint OidDelta = 0x0E05C687u;
+
     /// <summary>
     /// Finds companion files (KTID, MTL, GRP, …) for a G1M by scanning the same fdata container.
     /// Collects all companion-typed assets whose fdata offset falls between this G1M and the next
@@ -487,6 +491,60 @@ public sealed partial class MainViewModel : ObservableObject
                      && a.Record.FdataOffset >  g1mOffset
                      && a.Record.FdataOffset <  upperBound)
             .ToList();
+    }
+
+    /// <summary>
+    /// Resolves the .oid bone-binding file for a G1M using two strategies:
+    /// 1. Direct arithmetic:  oid_fk = g1m_fk - OidDelta  (base models, 100% hit rate)
+    /// 2. Name-based fallback: for variation G1Ms that share a base model's skeleton
+    ///    (e.g. ARD_COS_001.g1m → ARD_COS_000.oid), by decrementing the trailing _NNN suffix.
+    /// Returns null when no OID can be resolved (face/hair meshes driven by a parent skeleton).
+    /// </summary>
+    private AssetItemViewModel? ResolveOidForG1m(AssetItemViewModel vm)
+    {
+        // Primary: arithmetic lookup
+        uint oidFk = unchecked(vm.Record.FileKtid - OidDelta);
+        if (_allAssetsByKtid.TryGetValue(oidFk, out var oidVm))
+        {
+            // Name verification ��� only when both names are recovered; skip silently otherwise.
+            if (vm.RecoveredName is { } g1mName && oidVm.RecoveredName is { } oidName)
+            {
+                string g1mBase = Path.GetFileNameWithoutExtension(g1mName);
+                string oidBase = Path.GetFileNameWithoutExtension(oidName);
+                if (!string.Equals(g1mBase, oidBase, StringComparison.OrdinalIgnoreCase))
+                    AppLogger.Warn($"[Bundle] OID name mismatch: G1M={g1mName} OID={oidName} (arithmetic 0x{oidFk:x8})");
+            }
+            return oidVm;
+        }
+
+        // Fallback: variation G1M — try base model (e.g. ARD_COS_001 → ARD_COS_000)
+        string? recovered = vm.RecoveredName;
+        if (recovered is null) return null;
+
+        string baseName = Path.GetFileNameWithoutExtension(recovered);
+        var m = Regex.Match(baseName, @"^(.+?)_(\d+)$");
+        if (!m.Success) return null;
+
+        string prefix   = m.Groups[1].Value;
+        string numStr   = m.Groups[2].Value;
+        int    number   = int.Parse(numStr);
+        int    padWidth = numStr.Length;
+
+        for (int n = number - 1; n >= 0; n--)
+        {
+            string candidateOidName = $"{prefix}_{n.ToString().PadLeft(padWidth, '0')}.oid";
+            var candidate = _allAssetsByKtid.Values.FirstOrDefault(a =>
+                a.TypeExt == ".oid" &&
+                a.RecoveredName != null &&
+                string.Equals(a.RecoveredName, candidateOidName, StringComparison.OrdinalIgnoreCase));
+            if (candidate != null)
+            {
+                AppLogger.Info($"[Bundle] OID fallback: {recovered} → {candidateOidName}");
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     private async Task<List<AssetItemViewModel>> ResolveG1tFilesForModelAsync(AssetItemViewModel vm)
@@ -631,6 +689,9 @@ public sealed partial class MainViewModel : ObservableObject
                 _allAssetsByKtid.TryGetValue(oidexFk, out oidexVm);
         }
 
+        // OID: arithmetic (base models) + name-based fallback (variation G1Ms)
+        var oidVm = ResolveOidForG1m(vm);
+
         await Task.Run(() =>
         {
             try
@@ -641,6 +702,7 @@ public sealed partial class MainViewModel : ObservableObject
                 toExport.AddRange(companions);
                 if (grpVm   != null) toExport.Add(grpVm);
                 if (oidexVm != null) toExport.Add(oidexVm);
+                if (oidVm   != null) toExport.Add(oidVm);
                 toExport.AddRange(g1tFiles);
 
                 foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))
