@@ -9,7 +9,7 @@ namespace KissakiViewer.Core;
 /// </summary>
 public sealed class GameLoadCache
 {
-    private static readonly byte[] MagicBytes = "KSCACH01"u8.ToArray();
+    private static readonly byte[] MagicBytes = "KSCACH02"u8.ToArray();  // v02: rigbin section added
 
     public record RdbInfo(string Path, long ModTimeTicks);
 
@@ -22,14 +22,19 @@ public sealed class GameLoadCache
     /// <summary>G1M FileKtid → OIDEX FileKtid.</summary>
     public IReadOnlyDictionary<uint, uint> G1mToOidex { get; }
 
+    /// <summary>G1M FileKtid → rigbin FileKtid.</summary>
+    public IReadOnlyDictionary<uint, uint> G1mToRigbin { get; }
+
     private GameLoadCache(
         Dictionary<uint, (int, uint)[]> g1mToG1tSlots,
         Dictionary<uint, uint> g1mToGrp,
-        Dictionary<uint, uint> g1mToOidex)
+        Dictionary<uint, uint> g1mToOidex,
+        Dictionary<uint, uint> g1mToRigbin)
     {
         G1mToG1tSlots = g1mToG1tSlots;
         G1mToGrp      = g1mToGrp;
         G1mToOidex    = g1mToOidex;
+        G1mToRigbin   = g1mToRigbin;
     }
 
     // ── File path ─────────────────────────────────────────────────────────────
@@ -107,10 +112,16 @@ public sealed class GameLoadCache
             for (int i = 0; i < oidxCount; i++)
                 g1mToOidex[br.ReadUInt32()] = br.ReadUInt32();
 
+            // G1M → rigbin
+            int rigbinCount  = br.ReadInt32();
+            var g1mToRigbin  = new Dictionary<uint, uint>(rigbinCount);
+            for (int i = 0; i < rigbinCount; i++)
+                g1mToRigbin[br.ReadUInt32()] = br.ReadUInt32();
+
             AppLogger.Info(
                 $"[Cache] Cache valid: {g1tCount} G1M→G1T, " +
-                $"{grpCount} GRP, {oidxCount} OIDEX");
-            return new GameLoadCache(g1mToG1t, g1mToGrp, g1mToOidex);
+                $"{grpCount} GRP, {oidxCount} OIDEX, {rigbinCount} rigbin");
+            return new GameLoadCache(g1mToG1t, g1mToGrp, g1mToOidex, g1mToRigbin);
         }
         catch (Exception ex)
         {
@@ -131,7 +142,8 @@ public sealed class GameLoadCache
         IReadOnlyList<RdbInfo>                                    rdbInfos,
         IReadOnlyDictionary<uint, IReadOnlyList<(int Slot, uint G1tFk)>> g1mToG1tSlots,
         IReadOnlyDictionary<uint, uint>                           g1mToGrp,
-        IReadOnlyDictionary<uint, uint>                           g1mToOidex)
+        IReadOnlyDictionary<uint, uint>                           g1mToOidex,
+        IReadOnlyDictionary<uint, uint>                           g1mToRigbin)
     {
         string tmpFile = cacheFile + ".tmp";
         try
@@ -164,7 +176,10 @@ public sealed class GameLoadCache
             foreach (var (k, v) in g1mToGrp)  { bw.Write(k); bw.Write(v); }
 
             bw.Write(g1mToOidex.Count);
-            foreach (var (k, v) in g1mToOidex) { bw.Write(k); bw.Write(v); }
+            foreach (var (k, v) in g1mToOidex)  { bw.Write(k); bw.Write(v); }
+
+            bw.Write(g1mToRigbin.Count);
+            foreach (var (k, v) in g1mToRigbin) { bw.Write(k); bw.Write(v); }
         }
         catch
         {

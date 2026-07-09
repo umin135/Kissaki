@@ -99,6 +99,7 @@ public sealed partial class MainViewModel : ObservableObject
     // Null when the game has no DM-record-containing DOK (no companion info available).
     private IReadOnlyDictionary<uint, uint>? _cachedG1mToGrpFk;
     private IReadOnlyDictionary<uint, uint>? _cachedG1mToOidexFk;
+    private IReadOnlyDictionary<uint, uint>? _cachedG1mToRigbinFk;
 
     // RDB infos used for cache validation (actual files loaded, may be Kashira backups).
     private List<Core.GameLoadCache.RdbInfo> _loadedRdbInfos = [];
@@ -300,8 +301,9 @@ public sealed partial class MainViewModel : ObservableObject
                 if (hits > 0) combinedG1tMap[g1mFk] = arr.ToList().AsReadOnly();
             }
             _g1mToG1tMap          = combinedG1tMap;
-            _cachedG1mToGrpFk     = cached.G1mToGrp.Count   > 0 ? cached.G1mToGrp   : null;
-            _cachedG1mToOidexFk   = cached.G1mToOidex.Count > 0 ? cached.G1mToOidex : null;
+            _cachedG1mToGrpFk     = cached.G1mToGrp.Count    > 0 ? cached.G1mToGrp    : null;
+            _cachedG1mToOidexFk   = cached.G1mToOidex.Count  > 0 ? cached.G1mToOidex  : null;
+            _cachedG1mToRigbinFk  = cached.G1mToRigbin.Count > 0 ? cached.G1mToRigbin : null;
 
             // Preload into MasterDokCache so AssetViewerViewModel also benefits.
             _masterDokCache?.PreloadG1tResults(_g1mToG1tMap);
@@ -350,9 +352,10 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     LoadProgress = 96;
                     StatusText   = "Building GRP/OIDEX maps...";
-                    var (grpMap, oidexMap) = await _masterDokCache.GetCompanionMapsAsync();
-                    _cachedG1mToGrpFk   = grpMap;
-                    _cachedG1mToOidexFk = oidexMap;
+                    var (grpMap, oidexMap, rigbinMap) = await _masterDokCache.GetCompanionMapsAsync();
+                    _cachedG1mToGrpFk    = grpMap;
+                    _cachedG1mToOidexFk  = oidexMap;
+                    _cachedG1mToRigbinFk = rigbinMap;
                 }
 
                 // Preload into MasterDokCache for AssetViewerViewModel
@@ -373,8 +376,9 @@ public sealed partial class MainViewModel : ObservableObject
                     Core.GameLoadCache.Save(
                         cacheFile, _loadedRdbInfos,
                         slotsForCache,
-                        _cachedG1mToGrpFk ?? new Dictionary<uint, uint>(),
-                        _cachedG1mToOidexFk ?? new Dictionary<uint, uint>());
+                        _cachedG1mToGrpFk    ?? new Dictionary<uint, uint>(),
+                        _cachedG1mToOidexFk  ?? new Dictionary<uint, uint>(),
+                        _cachedG1mToRigbinFk ?? new Dictionary<uint, uint>());
 
                     AppLogger.Info($"[Cache] Saved: {combinedMap.Count} G1M→G1T entries");
                 }
@@ -415,6 +419,14 @@ public sealed partial class MainViewModel : ObservableObject
         {
             names = await Task.Run(() => NameDictionaryService.Load(csvPath));
             AppLogger.Info($"[NameDictionary] CSV loaded (AppID={appId}): {names.Count} entries");
+        }
+        else if (appId == "4144680") // DOA6LR — auto-recover from kidsscndb chain
+        {
+            AppLogger.Info("[Doa6Name] No CSV found — running DOA6LR name recovery...");
+            StatusText = "Recovering names (DOA6LR)...";
+            names = await Doa6NameRecovery.BuildAsync(_allAssetsByKtid, _extractor!);
+            if (names.Count > 0)
+                await Task.Run(() => NameDictionaryService.Save(csvPath, names));
         }
         else
         {
@@ -678,7 +690,7 @@ public sealed partial class MainViewModel : ObservableObject
         // Resolve G1T (always) + companion files (only when companion maps are available)
         var g1tFiles = await ResolveG1tFilesForModelAsync(vm);
         List<AssetItemViewModel> companions = [];
-        AssetItemViewModel? grpVm = null, oidexVm = null;
+        AssetItemViewModel? grpVm = null, oidexVm = null, rigbinVm = null;
         if (_cachedG1mToGrpFk != null)
         {
             companions = ResolveCompanionFiles(vm);  // KTID, MTL, GRP (fdata window)
@@ -687,6 +699,8 @@ public sealed partial class MainViewModel : ObservableObject
                 _allAssetsByKtid.TryGetValue(grpFk, out grpVm);
             if (_cachedG1mToOidexFk != null && _cachedG1mToOidexFk.TryGetValue(fk, out uint oidexFk))
                 _allAssetsByKtid.TryGetValue(oidexFk, out oidexVm);
+            if (_cachedG1mToRigbinFk != null && _cachedG1mToRigbinFk.TryGetValue(fk, out uint rigbinFk))
+                _allAssetsByKtid.TryGetValue(rigbinFk, out rigbinVm);
         }
 
         // OID: arithmetic (base models) + name-based fallback (variation G1Ms)
@@ -700,9 +714,10 @@ public sealed partial class MainViewModel : ObservableObject
 
                 var toExport = new List<AssetItemViewModel> { vm };
                 toExport.AddRange(companions);
-                if (grpVm   != null) toExport.Add(grpVm);
-                if (oidexVm != null) toExport.Add(oidexVm);
-                if (oidVm   != null) toExport.Add(oidVm);
+                if (grpVm    != null) toExport.Add(grpVm);
+                if (oidexVm  != null) toExport.Add(oidexVm);
+                if (rigbinVm != null) toExport.Add(rigbinVm);
+                if (oidVm    != null) toExport.Add(oidVm);
                 toExport.AddRange(g1tFiles);
 
                 foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))

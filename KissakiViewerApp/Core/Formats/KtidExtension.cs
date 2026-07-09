@@ -33,13 +33,13 @@ public static class KtidExtension
         [0x7BCD279F] = ".g1s",
         [0x9CB3A4B6] = ".oidex",
         // ── Identified via probe (DOA6LR) ─────────────────────────────────────
-        [0x17614af5] = ".m1gk",   // M1GK — medium-quality geometry (87 files)
-        [0x79c724c2] = ".p1gk",   // P1GK — geometry variant          (87 files)
-        [0xa8d88566] = ".c1gk",   // C1GK — geometry variant          (87 files)
+        [0x17614af5] = ".g1mx",   // G1MX — medium-quality geometry (87 files)
+        [0x79c724c2] = ".g1p",    // G1P  — geometry variant          (87 files)
+        [0xa8d88566] = ".g1cox",  // G1COX — geometry variant         (87 files)
         [0x4d0102ac] = ".me1g",   // ME1G — large mesh data           (40 files)
-        [0x5599aa51] = ".lcsk",   // LCSK — culling/scene data        (189 files)
-        [0xb097d41f] = ".xf1g",   // XF1G — shader/VFX data          (1121 files)
-        [0xed410290] = ".gstk",   // GSTK — small config             (28 files)
+        [0x5599aa51] = ".kscl",   // KSCL — culling/scene data        (189 files)
+        [0xb097d41f] = ".g1e",    // G1E  — shader/VFX data          (1121 files)
+        [0xed410290] = ".kts",    // KTS (GSTK magic) — soft-body physics config (28 files)
         // ── RDBExplorer-derived (non-conflicting additions) ───────────────────
         [0xBEF563DD] = ".g1m",   // StreamingMeshletModelData
         [0x7461C7CA] = ".g1h",   // ShapeData
@@ -49,7 +49,7 @@ public static class KtidExtension
         [0xDBCB74A9] = ".oid",   // OIDFile
         [0xE6A3C3BB] = ".oidex", // OIDBindTableBinaryFileEx
         [0x753AA042] = ".oidsq", // OIDSQTBindTableBinaryFile
-        [0x4F16D0EF] = ".kts",   // KTSFile
+
         [0xA1BDB205] = ".g2n",   // G2NFile
         [0x96C74B4F] = ".g2n",   // G2NGlyphSetFile
         [0xA027E46B] = ".mov",   // VideoStreamset
@@ -88,7 +88,7 @@ public static class KtidExtension
         0x56efe45c or 0xbbf9b49d                        => "Parts (.grp)",
         0x5C3E543C                                      => "Physics (.swg)",
         0xb097d41f                                      => "VFX (.xf1g)",
-        0x17614af5 or 0x79c724c2 or 0xa8d88566          => "Mesh (.m1gk)",
+        0x17614af5 or 0x79c724c2 or 0xa8d88566          => "Mesh (.g1mx)",
         0xF20DE437                                      => "UI (.texinfo)",
         _                                               => "Misc",
     };

@@ -24,6 +24,9 @@
     <Content Include="res\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="..\_docs\name_csv\merged.csv" Link="res\dict_rdb_names\4144680.csv">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

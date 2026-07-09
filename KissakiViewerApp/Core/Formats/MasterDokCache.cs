@@ -30,6 +30,7 @@ public sealed class MasterDokCache
     private const uint PropDmCsvObjId   = 0xf92c5190u;  // → TextureBindTableCSV local obj_id (KTID chain)
     private const uint PropDmGrpFk      = 0x3bbfd9a5u;  // GRP FileKtid
     private const uint PropDmOidexFk    = 0x8dfd0584u;  // OIDEX FileKtid
+    private const uint PropDmRigbinFk   = 0x1b4ff321u;  // rigbin FileKtid (Displayset::Model prop[33])
 
     private static readonly int[] PropTypeSizes = [1, 1, 2, 2, 4, 4, 0, 0, 4, 0, 16, 0, 8, 12];
     private static readonly byte[] IdokMagic    = "IDOK0000"u8.ToArray();
@@ -38,10 +39,11 @@ public sealed class MasterDokCache
     // ── MasterContext ─────────────────────────────────────────────────────────
 
     private record MasterContext(
-        Dictionary<uint, uint> G1mFkToKtidFk,    // G1M FileKtid → KTID FileKtid  (for G1T chain)
-        Dictionary<uint, uint> ObjIdToG1tFk,     // DOK-local objId → G1T FileKtid
-        Dictionary<uint, uint> G1mFkToGrpFk,     // G1M FileKtid → GRP FileKtid   (Displayset::Model)
-        Dictionary<uint, uint> G1mFkToOidexFk);  // G1M FileKtid → OIDEX FileKtid
+        Dictionary<uint, uint> G1mFkToKtidFk,     // G1M FileKtid → KTID FileKtid  (for G1T chain)
+        Dictionary<uint, uint> ObjIdToG1tFk,      // DOK-local objId → G1T FileKtid
+        Dictionary<uint, uint> G1mFkToGrpFk,      // G1M FileKtid → GRP FileKtid   (Displayset::Model)
+        Dictionary<uint, uint> G1mFkToOidexFk,    // G1M FileKtid → OIDEX FileKtid
+        Dictionary<uint, uint> G1mFkToRigbinFk);  // G1M FileKtid → rigbin FileKtid
 
     // ── State ─────────────────────────────────────────────────────────────────
 
@@ -172,35 +174,38 @@ public sealed class MasterDokCache
     /// Returns the GRP and OIDEX FileKtid maps from the master DOK.
     /// Returns (null, null) when no DM DOKs were found or the DOK has no companion records.
     /// </summary>
-    public async Task<(IReadOnlyDictionary<uint, uint>? GrpMap, IReadOnlyDictionary<uint, uint>? OidexMap)>
+    public async Task<(IReadOnlyDictionary<uint, uint>? GrpMap,
+                       IReadOnlyDictionary<uint, uint>? OidexMap,
+                       IReadOnlyDictionary<uint, uint>? RigbinMap)>
         GetCompanionMapsAsync()
     {
         var ctx = await EnsureMasterContextAsync();
-        if (ctx is null) return (null, null);
-        return (ctx.G1mFkToGrpFk.Count > 0 ? ctx.G1mFkToGrpFk : null,
-                ctx.G1mFkToOidexFk.Count > 0 ? ctx.G1mFkToOidexFk : null);
+        if (ctx is null) return (null, null, null);
+        return (ctx.G1mFkToGrpFk.Count    > 0 ? ctx.G1mFkToGrpFk    : null,
+                ctx.G1mFkToOidexFk.Count  > 0 ? ctx.G1mFkToOidexFk  : null,
+                ctx.G1mFkToRigbinFk.Count > 0 ? ctx.G1mFkToRigbinFk : null);
     }
 
     /// <summary>
     /// Returns the GRP and OIDEX assets linked to <paramref name="g1mFileKtid"/>
     /// via the Displayset::Model record in the master DOK.
     /// </summary>
-    public async Task<(AssetItemViewModel? Grp, AssetItemViewModel? Oidex)>
+    public async Task<(AssetItemViewModel? Grp, AssetItemViewModel? Oidex, AssetItemViewModel? Rigbin)>
         GetCompanionAssetsAsync(uint g1mFileKtid)
     {
         var ctx = await EnsureMasterContextAsync();
-        if (ctx is null) return (null, null);
+        if (ctx is null) return (null, null, null);
 
-        AssetItemViewModel? grp = null;
-        AssetItemViewModel? oidex = null;
+        AssetItemViewModel? grp = null, oidex = null, rigbin = null;
 
         if (ctx.G1mFkToGrpFk.TryGetValue(g1mFileKtid, out uint grpFk))
             _allAssetsByKtid.TryGetValue(grpFk, out grp);
-
         if (ctx.G1mFkToOidexFk.TryGetValue(g1mFileKtid, out uint oidexFk))
             _allAssetsByKtid.TryGetValue(oidexFk, out oidex);
+        if (ctx.G1mFkToRigbinFk.TryGetValue(g1mFileKtid, out uint rigbinFk))
+            _allAssetsByKtid.TryGetValue(rigbinFk, out rigbin);
 
-        return (grp, oidex);
+        return (grp, oidex, rigbin);
     }
 
     // ── Lazy init ─────────────────────────────────────────────────────────────
@@ -267,28 +272,31 @@ public sealed class MasterDokCache
 
     private MasterContext? MergeDmDoks(List<(byte[] Data, uint FileKtid, int G1mCount)> dmDoks)
     {
-        var g1mFkToKtidFk  = new Dictionary<uint, uint>();
-        var objIdToG1tFk   = new Dictionary<uint, uint>();
-        var g1mFkToGrpFk   = new Dictionary<uint, uint>();
-        var g1mFkToOidexFk = new Dictionary<uint, uint>();
+        var g1mFkToKtidFk   = new Dictionary<uint, uint>();
+        var objIdToG1tFk    = new Dictionary<uint, uint>();
+        var g1mFkToGrpFk    = new Dictionary<uint, uint>();
+        var g1mFkToOidexFk  = new Dictionary<uint, uint>();
+        var g1mFkToRigbinFk = new Dictionary<uint, uint>();
 
         foreach (var (data, _, _) in dmDoks)
         {
             var ctx = ParseMasterDok(data);
             if (ctx is null) continue;
-            foreach (var kv in ctx.G1mFkToKtidFk)  g1mFkToKtidFk.TryAdd(kv.Key, kv.Value);
-            foreach (var kv in ctx.ObjIdToG1tFk)    objIdToG1tFk.TryAdd(kv.Key, kv.Value);
-            foreach (var kv in ctx.G1mFkToGrpFk)    g1mFkToGrpFk.TryAdd(kv.Key, kv.Value);
-            foreach (var kv in ctx.G1mFkToOidexFk)  g1mFkToOidexFk.TryAdd(kv.Key, kv.Value);
+            foreach (var kv in ctx.G1mFkToKtidFk)   g1mFkToKtidFk.TryAdd(kv.Key, kv.Value);
+            foreach (var kv in ctx.ObjIdToG1tFk)     objIdToG1tFk.TryAdd(kv.Key, kv.Value);
+            foreach (var kv in ctx.G1mFkToGrpFk)     g1mFkToGrpFk.TryAdd(kv.Key, kv.Value);
+            foreach (var kv in ctx.G1mFkToOidexFk)   g1mFkToOidexFk.TryAdd(kv.Key, kv.Value);
+            foreach (var kv in ctx.G1mFkToRigbinFk)  g1mFkToRigbinFk.TryAdd(kv.Key, kv.Value);
         }
 
         AppLogger.Info(
             $"[MasterDokCache] Merged {dmDoks.Count} DM DOKs: " +
             $"{g1mFkToKtidFk.Count} G1M→KTID, {objIdToG1tFk.Count} objId→G1T, " +
-            $"{g1mFkToGrpFk.Count} G1M→GRP, {g1mFkToOidexFk.Count} G1M→OIDEX");
+            $"{g1mFkToGrpFk.Count} G1M→GRP, {g1mFkToOidexFk.Count} G1M→OIDEX, " +
+            $"{g1mFkToRigbinFk.Count} G1M→rigbin");
 
         if (g1mFkToKtidFk.Count == 0 && g1mFkToGrpFk.Count == 0) return null;
-        return new MasterContext(g1mFkToKtidFk, objIdToG1tFk, g1mFkToGrpFk, g1mFkToOidexFk);
+        return new MasterContext(g1mFkToKtidFk, objIdToG1tFk, g1mFkToGrpFk, g1mFkToOidexFk, g1mFkToRigbinFk);
     }
 
     // ── DOK parsing ───────────────────────────────────────────────────────────
@@ -332,11 +340,12 @@ public sealed class MasterDokCache
         int hdrSize = (int)ReadU32(data, 8);
         if (hdrSize >= data.Length) return null;
 
-        var objIdToG1tFk   = new Dictionary<uint, uint>();
-        var objIdToKtidFk  = new Dictionary<uint, uint>();
-        var pendingG1mKtid = new List<(uint g1mFk, uint ktidOid)>();
-        var g1mFkToGrpFk   = new Dictionary<uint, uint>();
-        var g1mFkToOidexFk = new Dictionary<uint, uint>();
+        var objIdToG1tFk    = new Dictionary<uint, uint>();
+        var objIdToKtidFk   = new Dictionary<uint, uint>();
+        var pendingG1mKtid  = new List<(uint g1mFk, uint ktidOid)>();
+        var g1mFkToGrpFk    = new Dictionary<uint, uint>();
+        var g1mFkToOidexFk  = new Dictionary<uint, uint>();
+        var g1mFkToRigbinFk = new Dictionary<uint, uint>();
 
         int pos = hdrSize;
         while (pos + 16 <= data.Length)
@@ -378,12 +387,14 @@ public sealed class MasterDokCache
                             // Displayset::Model: OIDResourceNameHash == G1M FK.
                             // KTID chain: DM.prop[0xf92c5190] → TextureBindTableCSV local obj_id
                             //             TBTCSV.OIDResourceNameHash → KTID FK → via objIdToKtidFk
-                            uint? csvOid  = ReadPropValue(data, pos, numProps, refOff, PropDmCsvObjId);
-                            uint? grpFk   = ReadPropValue(data, pos, numProps, refOff, PropDmGrpFk);
-                            uint? oidexFk = ReadPropValue(data, pos, numProps, refOff, PropDmOidexFk);
-                            if (csvOid.HasValue)  pendingG1mKtid.Add((refFk, csvOid.Value));
-                            if (grpFk.HasValue)   g1mFkToGrpFk[refFk]   = grpFk.Value;
-                            if (oidexFk.HasValue) g1mFkToOidexFk[refFk] = oidexFk.Value;
+                            uint? csvOid   = ReadPropValue(data, pos, numProps, refOff, PropDmCsvObjId);
+                            uint? grpFk    = ReadPropValue(data, pos, numProps, refOff, PropDmGrpFk);
+                            uint? oidexFk  = ReadPropValue(data, pos, numProps, refOff, PropDmOidexFk);
+                            uint? rigbinFk = ReadPropValue(data, pos, numProps, refOff, PropDmRigbinFk);
+                            if (csvOid.HasValue)              pendingG1mKtid.Add((refFk, csvOid.Value));
+                            if (grpFk.HasValue)               g1mFkToGrpFk[refFk]    = grpFk.Value;
+                            if (oidexFk.HasValue)             g1mFkToOidexFk[refFk]  = oidexFk.Value;
+                            if (rigbinFk is { } rb && rb != 0) g1mFkToRigbinFk[refFk] = rb;
                         }
                         else
                         {
@@ -410,7 +421,7 @@ public sealed class MasterDokCache
 
         if (g1mFkToKtidFk.Count == 0 && g1mFkToGrpFk.Count == 0) return null;
 
-        return new MasterContext(g1mFkToKtidFk, objIdToG1tFk, g1mFkToGrpFk, g1mFkToOidexFk);
+        return new MasterContext(g1mFkToKtidFk, objIdToG1tFk, g1mFkToGrpFk, g1mFkToOidexFk, g1mFkToRigbinFk);
     }
 
     // ── KTID / slot resolution ────────────────────────────────────────────────
