@@ -26,7 +26,14 @@ public static class KidsObjDbDecoder
     private static readonly Dictionary<uint, string> s_propNames = new()
     {
         [0xD2D2D5AFu] = "OIDResourceNameHash",
-        [0xAD260326u] = "PropKtidLink",
+        [0xAD260326u] = "PropKtidLink",          // DM: DOK-local obj_id → KTID IDOK (value is NOT a FileKtid)
+        [0x8AB68B3Fu] = "DmG1mFk",               // DM: G1M FileKtid
+        [0x3BBFd9A5u] = "DmGrpFk",               // DM: GRP FileKtid
+        [0x8DFD0584u] = "DmOidexFk",             // DM: OIDEX FileKtid
+        [0x1B4FF321u] = "DmRigbinFk",            // DM: rigbin FileKtid
+        [0xF92C5190u] = "DmCsvObjId",            // DM: TextureBindTableCSV local obj_id
+        [0x07AAF542u] = "DmSidFk",               // DM: SID (physics sim) FileKtid
+        [0x2B6EB4F6u] = "DmMudObjId",            // DM: MUD DOK local obj_id
         [0xBAF0DF79u] = "EnableModelGroupBuffer",
         [0xD3C00659u] = "ShadowCasterAlphaThreshold",
         [0xD69D6C64u] = "ZeroLevel",

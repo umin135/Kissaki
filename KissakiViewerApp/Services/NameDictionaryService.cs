@@ -7,15 +7,58 @@ namespace KissakiViewer.Services;
 /// <summary>
 /// KTID→이름 사전 CSV 로드/저장.
 /// 형식: 0xHEXKTID,path/to/name  (RDBExplorer rdb_names.csv 호환)
-/// 경로: &lt;툴경로&gt;/res/dict_rdb_names/{AppID}.csv  (게임별 분리)
+/// 경로: &lt;툴경로&gt;/res/dict_rdb_names/{ExeName}.csv  (게임별 분리, ExeName = EXE 파일명 확장자 제외)
 /// </summary>
 public static class NameDictionaryService
 {
     private static readonly string DictDir =
         Path.Combine(AppContext.BaseDirectory, "res", "dict_rdb_names");
 
-    public static string GetCsvPath(string appId) =>
-        Path.Combine(DictDir, $"{appId}.csv");
+    // AppID(문자열) → EXE 파일명(확장자 제외) 마이그레이션 표
+    // SteamScanner.s_knownGames와 동기화 유지
+    private static readonly (string AppId, string ExeNameNoExt)[] s_legacyMigrations =
+    [
+        ("4144680", "DOA6LR"),
+        ("3155730", "Venus Vacation PRISM - DEAD OR ALIVE Xtreme -"),
+        ("1340990", "Ronin"),
+        ("3123410", "Atelier_Yumia"),
+        ("3473170", "Atelier_Yumia"),
+        ("3920610", "FatalFrameII"),
+        ("4226020", "FatalFrameII"),
+        ("3681010", "nioh3"),
+    ];
+
+    public static string GetCsvPath(string exeName) =>
+        Path.Combine(DictDir, $"{exeName}.csv");
+
+    /// <summary>
+    /// AppID 기반 구 CSV 파일을 ExeName 기반으로 일괄 마이그레이션.
+    /// 대상 파일이 이미 존재하면 덮어쓰지 않고 건너뜀.
+    /// </summary>
+    public static void MigrateOldCsvFiles()
+    {
+        if (!Directory.Exists(DictDir)) return;
+        foreach (var (appId, exeName) in s_legacyMigrations)
+        {
+            string oldPath = Path.Combine(DictDir, $"{appId}.csv");
+            string newPath = Path.Combine(DictDir, $"{exeName}.csv");
+            if (!File.Exists(oldPath)) continue;
+            if (File.Exists(newPath))
+            {
+                AppLogger.Info($"[NameDictionary] Migration skipped (target exists): {appId}.csv → {exeName}.csv");
+                continue;
+            }
+            try
+            {
+                File.Move(oldPath, newPath);
+                AppLogger.Info($"[NameDictionary] Migrated {appId}.csv → {exeName}.csv");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[NameDictionary] Migration failed {appId}.csv → {exeName}.csv: {ex.Message}");
+            }
+        }
+    }
 
     public static Dictionary<uint, string> Load(string csvPath)
     {

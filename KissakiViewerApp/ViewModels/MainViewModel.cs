@@ -11,6 +11,7 @@ using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 namespace KissakiViewer.ViewModels;
 
@@ -62,6 +63,41 @@ public sealed partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private bool _isGridView;
+
+    // ── Container filter ──────────────────────────────────────────────────────
+
+    [ObservableProperty]
+    private ObservableCollection<ContainerFilterItem> _containerFilters = [];
+
+    /// <summary>Search text inside the container-filter popup (does not trigger ApplyFilterAsync).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(FilteredContainerItems))]
+    private string _containerFilterText = string.Empty;
+
+    [ObservableProperty]
+    private bool _isContainerFilterPopupOpen;
+
+    public IEnumerable<ContainerFilterItem> FilteredContainerItems =>
+        string.IsNullOrWhiteSpace(ContainerFilterText)
+            ? ContainerFilters
+            : ContainerFilters.Where(c =>
+                c.Display.Contains(ContainerFilterText, StringComparison.OrdinalIgnoreCase) ||
+                c.RdbSource.Contains(ContainerFilterText, StringComparison.OrdinalIgnoreCase));
+
+    public string ContainerFilterLabel
+    {
+        get
+        {
+            if (ContainerFilters.Count == 0) return "fdata";
+            int enabled = ContainerFilters.Count(c => c.IsEnabled);
+            if (enabled == 0)           return "fdata [OFF]";
+            if (enabled == ContainerFilters.Count) return "fdata";
+            return $"fdata [{enabled}/{ContainerFilters.Count}]";
+        }
+    }
+
+    public bool IsContainerFilterActive =>
+        ContainerFilters.Count > 0 && ContainerFilters.Any(c => !c.IsEnabled);
 
     /// <summary>Live log lines streamed from AppLogger — bound to the console panel.</summary>
     public ObservableCollection<string> ConsoleLog { get; } = [];
@@ -250,6 +286,7 @@ public sealed partial class MainViewModel : ObservableObject
         _allAssetsByKtid = byKtid!;
 
         BuildTypeFilters();
+        BuildContainerFilters();
         AppLogger.Info($"Assets loaded: {Assets.Count:N0}");
 
         FilteredAssets = Assets;
@@ -408,19 +445,19 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (_extractor == null) return;
 
-        AppLogger.Info("[NameRecovery] Getting AppId...");
-        string appId   = AppIdService.GetAppId(_profile.GameDirectory);
-        AppLogger.Info($"[NameRecovery] AppId={appId}, checking CSV...");
-        string csvPath = NameDictionaryService.GetCsvPath(appId);
+        NameDictionaryService.MigrateOldCsvFiles();
+        string exeName = Path.GetFileNameWithoutExtension(_profile.ExeName);
+        AppLogger.Info($"[NameRecovery] ExeName={exeName}, checking CSV...");
+        string csvPath = NameDictionaryService.GetCsvPath(exeName);
 
         Dictionary<uint, string> names;
 
         if (File.Exists(csvPath))
         {
             names = await Task.Run(() => NameDictionaryService.Load(csvPath));
-            AppLogger.Info($"[NameDictionary] CSV loaded (AppID={appId}): {names.Count} entries");
+            AppLogger.Info($"[NameDictionary] CSV loaded ({exeName}): {names.Count} entries");
         }
-        else if (appId == "4144680") // DOA6LR — auto-recover from kidsscndb chain
+        else if (exeName.Equals("DOA6LR", StringComparison.OrdinalIgnoreCase)) // DOA6LR — auto-recover from kidsscndb chain
         {
             AppLogger.Info("[Doa6Name] No CSV found — running DOA6LR name recovery...");
             StatusText = "Recovering names (DOA6LR)...";
@@ -431,7 +468,7 @@ public sealed partial class MainViewModel : ObservableObject
         else
         {
             names = [];
-            AppLogger.Info($"[NameDictionary] No CSV found (AppID={appId})");
+            AppLogger.Info($"[NameDictionary] No CSV found ({exeName})");
         }
 
         _nameMap = names;
@@ -559,6 +596,43 @@ public sealed partial class MainViewModel : ObservableObject
         return null;
     }
 
+    /// <summary>
+    /// Finds all G1T textures and companion-typed assets (KTID/MTL/GRP) that share the
+    /// same name prefix as the given G1M.  Example: "KAS_COS_032.g1m" → returns everything
+    /// whose base name equals "KAS_COS_032" or starts with "KAS_COS_032_" / "KAS_COS_032.".
+    /// Only considers assets that have a recovered name.  Other G1M files are excluded.
+    /// </summary>
+    private List<AssetItemViewModel> ResolveByName(AssetItemViewModel vm)
+    {
+        if (vm.RecoveredName is null) return [];
+
+        // "KAS_COS_032" from DisplayName "KAS_COS_032.g1m"
+        string prefix = Path.GetFileNameWithoutExtension(vm.DisplayName);
+        if (string.IsNullOrEmpty(prefix)) return [];
+
+        var results = new List<AssetItemViewModel>();
+        foreach (var asset in _allAssetsByKtid.Values)
+        {
+            if (asset.Record.FileKtid == vm.Record.FileKtid) continue;
+            if (asset.RecoveredName is null) continue;
+            if (asset.IsG1m) continue;   // skip other G1M sub-meshes
+
+            string assetBase = Path.GetFileNameWithoutExtension(asset.DisplayName);
+            if (!assetBase.Equals(prefix, StringComparison.OrdinalIgnoreCase)
+                && !assetBase.StartsWith(prefix + "_", StringComparison.OrdinalIgnoreCase)
+                && !assetBase.StartsWith(prefix + ".", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // Include G1T textures and companion types (KTID / MTL / GRP / 0x133d2c3b)
+            if (asset.TypeExt == ".g1t"
+                || s_g1mCompanionTypeKtids.Contains(asset.Record.TypeKtid))
+            {
+                results.Add(asset);
+            }
+        }
+        return results;
+    }
+
     private async Task<List<AssetItemViewModel>> ResolveG1tFilesForModelAsync(AssetItemViewModel vm)
     {
         uint   ktid    = vm.Record.FileKtid;
@@ -672,7 +746,13 @@ public sealed partial class MainViewModel : ObservableObject
 
     /// <summary>
     /// Bundle export for G1M assets: exports the G1M + companion files (KTID, MTL, GRP …)
-    /// + all linked G1T files into a subfolder named by the G1M hash.
+    /// + all linked G1T files into a subfolder named by the G1M hash or recovered name.
+    ///
+    /// Resolution strategy:
+    ///   • Named G1M  → name-prefix search ("KAS_COS_032_*") across the full asset list.
+    ///   • Unnamed G1M → chain-based fallback (KidsObjDbResolver / MasterDokCache /
+    ///                   co-location / nearest fdata-ID).
+    /// OIDEX / RIGBIN always come from companion maps regardless of which path is used.
     /// </summary>
     [RelayCommand]
     private async Task ExportBundleAsync()
@@ -681,27 +761,99 @@ public sealed partial class MainViewModel : ObservableObject
         var vm = SelectedAsset;
 
         string exportDir = GetExportDir(vm, bundle: true);
-        StatusText = $"Exporting bundle... 0x{vm.Record.FileKtid:x8}";
+        string label = vm.RecoveredName is not null ? vm.DisplayName : $"0x{vm.Record.FileKtid:x8}";
+        StatusText = $"Exporting bundle... {label}";
 
         var extractor = _extractor;
         int count  = 0;
         string? err = null;
 
-        // Resolve G1T (always) + companion files (only when companion maps are available)
-        var g1tFiles = await ResolveG1tFilesForModelAsync(vm);
-        List<AssetItemViewModel> companions = [];
+        List<AssetItemViewModel> g1tFiles     = [];
+        List<AssetItemViewModel> companions   = [];
+        List<uint>               mprKtidFkList = [];
+        List<AssetItemViewModel> mprG1tFiles  = [];   // resolved MPR G1T files (Step 1c)
         AssetItemViewModel? grpVm = null, oidexVm = null, rigbinVm = null;
-        if (_cachedG1mToGrpFk != null)
+        uint g1mFk = vm.Record.FileKtid;
+
+        string namePrefix = vm.RecoveredName is not null
+            ? Path.GetFileNameWithoutExtension(vm.DisplayName)
+            : string.Empty;
+
+        // ── Step 1: DM record full-prop scan (DOA6 via MasterDokCache) ──────────
+        // Reads every UInt32 property from the Displayset::Model IDOK and collects
+        // any value that is a known FileKtid in the RDB.  Catches GRP, MTL, MUD DOK, SID etc.
+        var companionFks = new HashSet<uint>();
+        if (_masterDokCache != null)
         {
-            companions = ResolveCompanionFiles(vm);  // KTID, MTL, GRP (fdata window)
-            uint fk = vm.Record.FileKtid;
-            if (_cachedG1mToGrpFk.TryGetValue(fk, out uint grpFk))
-                _allAssetsByKtid.TryGetValue(grpFk, out grpVm);
-            if (_cachedG1mToOidexFk != null && _cachedG1mToOidexFk.TryGetValue(fk, out uint oidexFk))
-                _allAssetsByKtid.TryGetValue(oidexFk, out oidexVm);
-            if (_cachedG1mToRigbinFk != null && _cachedG1mToRigbinFk.TryGetValue(fk, out uint rigbinFk))
-                _allAssetsByKtid.TryGetValue(rigbinFk, out rigbinVm);
+            var dmLinked = await _masterDokCache.GetAllLinkedAssetsAsync(g1mFk);
+            foreach (var a in dmLinked.Where(a => s_g1mCompanionTypeKtids.Contains(a.Record.TypeKtid)))
+                if (companionFks.Add(a.Record.FileKtid)) companions.Add(a);
+            AppLogger.Info($"[Bundle] DM-linked companions: {companions.Count} for 0x{g1mFk:x8}");
         }
+
+        // ── Step 1b: MPR KTID + KTS via costume chain ────────────────────────────
+        // scndb (costume name → cos_oid) → CE1Common (cos_oid → MI[]) → MaterialEditor (MI → KTID FK).
+        // This is the only path to MPR colour-variation KTID files; they are not in the fdata window.
+        if (!string.IsNullOrEmpty(namePrefix) && _masterDokCache != null)
+        {
+            var mprKtidFks = await _masterDokCache.GetMprKtidFksAsync(namePrefix);
+            var ktsFks     = await _masterDokCache.GetKtsFksAsync(namePrefix);
+            mprKtidFkList = [..mprKtidFks];
+            // Step 1c: resolve MPR KTID objIds → G1T FileKtids via MaterialEditor DOK mapping
+            mprG1tFiles   = [..await _masterDokCache.GetMprG1tFilesAsync(mprKtidFkList)];
+            int mprAdded = 0, ktsAdded = 0;
+            foreach (uint fk in mprKtidFks)
+                if (_allAssetsByKtid.TryGetValue(fk, out var a) && companionFks.Add(fk))
+                { companions.Add(a); mprAdded++; }
+            foreach (uint fk in ktsFks)
+                if (_allAssetsByKtid.TryGetValue(fk, out var a) && companionFks.Add(fk))
+                { companions.Add(a); ktsAdded++; }
+            AppLogger.Info($"[Bundle] MPR: {mprAdded} KTID + {ktsAdded} KTS added for '{namePrefix}'");
+        }
+
+        // ── Step 2: Name-based G1T + companion search ────────────────────────────
+        // Works when textures share the same name prefix as the G1M (e.g. KAS_COS_032_*).
+        if (vm.RecoveredName is not null)
+        {
+            var named    = ResolveByName(vm);
+            var namedG1t = named.Where(a => a.TypeExt == ".g1t").ToList();
+            if (namedG1t.Count > 0)
+            {
+                g1tFiles = namedG1t;
+                AppLogger.Info($"[Bundle] Name-based G1T: {g1tFiles.Count} for '{namePrefix}'");
+            }
+            foreach (var a in named.Where(a => s_g1mCompanionTypeKtids.Contains(a.Record.TypeKtid)))
+                if (companionFks.Add(a.Record.FileKtid))
+                    companions.Add(a);
+        }
+
+        // ── Step 3: Chain-based G1T fallback ─────────────────────────────────────
+        // Textures may use a different naming convention (e.g. MPR_* or KASCOS202 vs KAS_COS_202).
+        if (g1tFiles.Count == 0)
+        {
+            if (vm.RecoveredName is not null)
+                AppLogger.Info($"[Bundle] '{namePrefix}': no G1T by name — using chain resolution");
+            g1tFiles = await ResolveG1tFilesForModelAsync(vm);
+        }
+
+        // ── Step 4: fdata-window companion supplement ─────────────────────────────
+        // Always runs — picks up co-located KTID/MTL/GRP in the same fdata block as the G1M.
+        // The main texture KTID lives here and is NOT directly referenced in DM props.
+        {
+            var fdataCompanions = ResolveCompanionFiles(vm);
+            foreach (var a in fdataCompanions)
+                if (companionFks.Add(a.Record.FileKtid))
+                    companions.Add(a);
+            if (_cachedG1mToGrpFk?.TryGetValue(g1mFk, out uint grpFk) == true)
+                _allAssetsByKtid.TryGetValue(grpFk, out grpVm);
+            AppLogger.Info($"[Bundle] fdata window: {fdataCompanions.Count} found, total companions: {companions.Count}");
+        }
+
+        // OIDEX and RIGBIN always from companion maps (different naming convention)
+        if (_cachedG1mToOidexFk != null && _cachedG1mToOidexFk.TryGetValue(g1mFk, out uint oidexFk))
+            _allAssetsByKtid.TryGetValue(oidexFk, out oidexVm);
+        if (_cachedG1mToRigbinFk != null && _cachedG1mToRigbinFk.TryGetValue(g1mFk, out uint rigbinFk))
+            _allAssetsByKtid.TryGetValue(rigbinFk, out rigbinVm);
 
         // OID: arithmetic (base models) + name-based fallback (variation G1Ms)
         var oidVm = ResolveOidForG1m(vm);
@@ -719,6 +871,21 @@ public sealed partial class MainViewModel : ObservableObject
                 if (rigbinVm != null) toExport.Add(rigbinVm);
                 if (oidVm    != null) toExport.Add(oidVm);
                 toExport.AddRange(g1tFiles);
+
+                // ── Step 1c: G1T files referenced by MPR KTID files ──────────────
+                // MPR KTID values are MaterialEditor DOK-local objIds, not FileKtids directly.
+                // Resolution: MatEdObjIdToG1tFk[objId] → G1T FileKtid (via MasterDokCache).
+                if (mprKtidFkList.Count > 0 && mprG1tFiles.Count > 0)
+                {
+                    var mprG1tSeen = new HashSet<uint>(toExport.Select(a => a.Record.FileKtid));
+                    int mprG1tAdded = 0;
+                    foreach (var g1tVm in mprG1tFiles)
+                    {
+                        if (mprG1tSeen.Add(g1tVm.Record.FileKtid))
+                        { toExport.Add(g1tVm); mprG1tAdded++; }
+                    }
+                    AppLogger.Info($"[Bundle] MPR G1T: {mprG1tAdded} textures from {mprKtidFkList.Count} MPR KTIDs");
+                }
 
                 foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))
                 {
@@ -851,10 +1018,18 @@ public sealed partial class MainViewModel : ObservableObject
         var    folder = SelectedFolderNode;
         var    assets = Assets;          // stable reference — not modified after LoadAsync
 
+        // Build a fast lookup for container filter (snapshot on UI thread before Task.Run).
+        var containerFilters = ContainerFilters;
+        bool noContainerFilter = containerFilters.Count == 0 ||
+                                 containerFilters.All(c => c.IsEnabled);
+        // Only materialise when needed — avoids allocation on the common all-enabled path.
+        HashSet<string>? disabledContainers = noContainerFilter ? null
+            : containerFilters.Where(c => !c.IsEnabled).Select(c => c.Key).ToHashSet();
+
         // Fast path: no filter active — reuse Assets directly, no new OC or List allocation.
         // This avoids the ~1.4 MB LOH allocation (List<> + OC<> backing array) that would
         // otherwise trigger a Gen2 GC pause and block the WPF dispatcher.
-        if (string.IsNullOrEmpty(text) && type == "All" && folder == null)
+        if (string.IsNullOrEmpty(text) && type == "All" && folder == null && noContainerFilter)
         {
             if (!ct.IsCancellationRequested)
             {
@@ -884,13 +1059,15 @@ public sealed partial class MainViewModel : ObservableObject
 
                 return source.Where(a =>
                 {
-                    bool typeOk = type == "All" || a.TypeExt == type;
-                    bool textOk = string.IsNullOrEmpty(text) ||
-                                  a.KtidHex.Contains(text, StringComparison.OrdinalIgnoreCase) ||
-                                  a.TypeExt.Contains(text, StringComparison.OrdinalIgnoreCase) ||
-                                  (a.RecoveredName != null &&
-                                   a.RecoveredName.Contains(text, StringComparison.OrdinalIgnoreCase));
-                    return typeOk && textOk;
+                    bool typeOk      = type == "All" || a.TypeExt == type;
+                    bool textOk      = string.IsNullOrEmpty(text) ||
+                                       a.KtidHex.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+                                       a.TypeExt.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+                                       (a.RecoveredName != null &&
+                                        a.RecoveredName.Contains(text, StringComparison.OrdinalIgnoreCase));
+                    bool containerOk = disabledContainers == null ||
+                                       !disabledContainers.Contains(a.Container);
+                    return typeOk && textOk && containerOk;
                 }).ToList();
             }, ct);
         }
@@ -910,6 +1087,48 @@ public sealed partial class MainViewModel : ObservableObject
         var types = Assets.Select(a => a.TypeExt).Distinct().OrderBy(x => x).ToList();
         TypeFilters        = new ObservableCollection<string>(new[] { "All" }.Concat(types));
         SelectedTypeFilter = "All";
+    }
+
+    private void BuildContainerFilters()
+    {
+        // Detach old callbacks
+        foreach (var old in ContainerFilters) old.OnChanged = null;
+
+        var items = Assets
+            .GroupBy(a => a.Container)
+            .OrderBy(g => g.Key)
+            .Select(g => new ContainerFilterItem(g.Key, g.First().RdbName, g.Count())
+                { OnChanged = OnContainerFilterItemChanged })
+            .ToList();
+
+        ContainerFilters = new ObservableCollection<ContainerFilterItem>(items);
+        OnPropertyChanged(nameof(ContainerFilterLabel));
+        OnPropertyChanged(nameof(IsContainerFilterActive));
+        OnPropertyChanged(nameof(FilteredContainerItems));
+    }
+
+    private void OnContainerFilterItemChanged()
+    {
+        OnPropertyChanged(nameof(ContainerFilterLabel));
+        OnPropertyChanged(nameof(IsContainerFilterActive));
+        ScheduleFilter();
+    }
+
+    [RelayCommand]
+    private void EnableAllContainers()  => SetAllContainers(true);
+
+    [RelayCommand]
+    private void DisableAllContainers() => SetAllContainers(false);
+
+    private void SetAllContainers(bool enabled)
+    {
+        // Suppress per-item ScheduleFilter callbacks during bulk update.
+        foreach (var c in ContainerFilters) c.OnChanged = null;
+        foreach (var c in ContainerFilters) c.IsEnabled = enabled;
+        foreach (var c in ContainerFilters) c.OnChanged = OnContainerFilterItemChanged;
+        OnPropertyChanged(nameof(ContainerFilterLabel));
+        OnPropertyChanged(nameof(IsContainerFilterActive));
+        ScheduleFilter();
     }
 
     // ── BitmapSource helper (for future use if needed) ────────────────────────

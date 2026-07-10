@@ -132,6 +132,95 @@
                                   SelectedItem="{Binding SelectedTypeFilter}"
                                   Width="90" Margin="6,0"/>
 
+                        <!-- Container filter button + popup -->
+                        <Grid DockPanel.Dock="Left" VerticalAlignment="Center">
+                            <ToggleButton x:Name="ContainerFilterButton"
+                                          IsChecked="{Binding IsContainerFilterPopupOpen, Mode=TwoWay}"
+                                          Padding="8,3" MinWidth="60"
+                                          ToolTip="Filter by fdata container">
+                                <ToggleButton.Style>
+                                    <Style TargetType="ToggleButton" BasedOn="{StaticResource {x:Type ToggleButton}}">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsContainerFilterActive}" Value="True">
+                                                <Setter Property="BorderBrush" Value="#c0392b"/>
+                                                <Setter Property="Foreground"  Value="#c0392b"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ToggleButton.Style>
+                                <TextBlock Text="{Binding ContainerFilterLabel}" FontSize="12"/>
+                            </ToggleButton>
+
+                            <Popup IsOpen="{Binding IsContainerFilterPopupOpen, Mode=TwoWay}"
+                                   PlacementTarget="{Binding ElementName=ContainerFilterButton}"
+                                   Placement="Bottom"
+                                   StaysOpen="False"
+                                   AllowsTransparency="True">
+                                <Border Background="{DynamicResource {x:Static adonisUI:Brushes.Layer2BackgroundBrush}}"
+                                        BorderBrush="{DynamicResource {x:Static adonisUI:Brushes.Layer2BorderBrush}}"
+                                        BorderThickness="1"
+                                        CornerRadius="3"
+                                        MinWidth="320" MaxWidth="380"
+                                        Padding="0,4">
+
+                                    <StackPanel>
+                                        <!-- Search -->
+                                        <TextBox Text="{Binding ContainerFilterText, UpdateSourceTrigger=PropertyChanged}"
+                                                 Margin="8,4,8,4"
+                                                 Tag="0x... 검색"
+                                                 FontFamily="Consolas" FontSize="12"/>
+
+                                        <!-- All On / All Off -->
+                                        <StackPanel Orientation="Horizontal"
+                                                    Margin="8,2,8,4">
+                                            <Button Content="All On"
+                                                    Command="{Binding EnableAllContainersCommand}"
+                                                    Padding="10,3" Margin="0,0,6,0" FontSize="11"/>
+                                            <Button Content="All Off"
+                                                    Command="{Binding DisableAllContainersCommand}"
+                                                    Padding="10,3" FontSize="11"/>
+                                        </StackPanel>
+
+                                        <Separator Margin="0,2"/>
+
+                                        <!-- Container list -->
+                                        <ScrollViewer MaxHeight="280"
+                                                      VerticalScrollBarVisibility="Auto"
+                                                      HorizontalScrollBarVisibility="Disabled">
+                                            <ItemsControl ItemsSource="{Binding FilteredContainerItems}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <CheckBox IsChecked="{Binding IsEnabled}"
+                                                                  Margin="8,3,8,3"
+                                                                  VerticalContentAlignment="Center">
+                                                            <StackPanel Orientation="Horizontal">
+                                                                <TextBlock Text="{Binding Display}"
+                                                                           FontFamily="Consolas" FontSize="12"
+                                                                           VerticalAlignment="Center"/>
+                                                                <TextBlock Text="{Binding RdbSource}"
+                                                                           FontSize="10" Opacity="0.5"
+                                                                           Margin="6,0,0,0"
+                                                                           VerticalAlignment="Center"/>
+                                                                <TextBlock FontSize="10" Opacity="0.45"
+                                                                           Margin="6,0,0,0"
+                                                                           VerticalAlignment="Center">
+                                                                    <TextBlock.Text>
+                                                                        <MultiBinding StringFormat="({0:N0})">
+                                                                            <Binding Path="AssetCount"/>
+                                                                        </MultiBinding>
+                                                                    </TextBlock.Text>
+                                                                </TextBlock>
+                                                            </StackPanel>
+                                                        </CheckBox>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </ScrollViewer>
+                                    </StackPanel>
+                                </Border>
+                            </Popup>
+                        </Grid>
+
                         <!-- TODO: Grid view layout broken (all items in one row) — re-enable after fix -->
                         <ToggleButton DockPanel.Dock="Right"
                                       IsChecked="{Binding IsGridView}"

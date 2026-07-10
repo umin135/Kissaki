@@ -6,7 +6,7 @@ namespace KissakiViewer.Core.Formats;
 
 /// <summary>
 /// DOA6LR-specific name recovery via kidsscndb → CharacterSetting → RenderSetting → CE G1M chain.
-/// Triggered automatically when no name CSV exists for AppID=4144680.
+/// Triggered automatically when no name CSV exists for DOA6LR.csv.
 ///
 /// Chain (all FKs are DOA6LR constants verified against KAS_COS_006→0x0957FBEC):
 ///   kidsscndb  FK=0x6D011726 — CharacterNameArray (prop 0x4D269345) + HashArray (prop 0x8F9F2DA6)
