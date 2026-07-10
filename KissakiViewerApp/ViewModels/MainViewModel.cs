@@ -9,6 +9,7 @@ using SixLabors.ImageSharp.PixelFormats;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -888,6 +889,7 @@ public sealed partial class MainViewModel : ObservableObject
                     AppLogger.Info($"[Bundle] MPR G1T: {mprG1tAdded} textures from {mprKtidFkList.Count} MPR KTIDs");
                 }
 
+                var hashByName = new Dictionary<string, string>();
                 foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))
                 {
                     string name = ExportFileName(asset);
@@ -895,6 +897,17 @@ public sealed partial class MainViewModel : ObservableObject
                     File.WriteAllBytes(Path.Combine(exportDir, name), raw);
                     AppLogger.Info($"[Bundle] {name} ({raw.Length:N0} B)");
                     count++;
+
+                    if (asset.RecoveredName is not null)
+                        hashByName[$"0x{asset.Record.FileKtid:x8}"] = asset.RecoveredName;
+                }
+
+                if (hashByName.Count > 0)
+                {
+                    string jsonPath = Path.Combine(exportDir, "HashByName.json");
+                    var opts = new JsonSerializerOptions { WriteIndented = true };
+                    File.WriteAllText(jsonPath, JsonSerializer.Serialize(hashByName, opts), System.Text.Encoding.UTF8);
+                    AppLogger.Info($"[Bundle] HashByName.json: {hashByName.Count} entries");
                 }
             }
             catch (Exception ex) { err = ex.Message; AppLogger.Error($"[Bundle] {ex.Message}"); }
