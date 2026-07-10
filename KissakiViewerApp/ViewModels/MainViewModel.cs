@@ -71,8 +71,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     /// <summary>Search text inside the container-filter popup (does not trigger ApplyFilterAsync).</summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FilteredContainerItems))]
     private string _containerFilterText = string.Empty;
+
+    private DispatcherTimer? _containerSearchTimer;
 
     [ObservableProperty]
     private bool _isContainerFilterPopupOpen;
@@ -1105,6 +1106,24 @@ public sealed partial class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ContainerFilterLabel));
         OnPropertyChanged(nameof(IsContainerFilterActive));
         OnPropertyChanged(nameof(FilteredContainerItems));
+    }
+
+    partial void OnContainerFilterTextChanged(string value)
+    {
+        if (_containerSearchTimer == null)
+        {
+            _containerSearchTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(200)
+            };
+            _containerSearchTimer.Tick += (_, _) =>
+            {
+                _containerSearchTimer.Stop();
+                OnPropertyChanged(nameof(FilteredContainerItems));
+            };
+        }
+        _containerSearchTimer.Stop();
+        _containerSearchTimer.Start();
     }
 
     private void OnContainerFilterItemChanged()
