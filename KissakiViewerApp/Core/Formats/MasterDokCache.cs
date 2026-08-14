@@ -342,7 +342,7 @@ public sealed class MasterDokCache
             }
         }
 
-        // Parse MPR costume chain singletons (DOA6-specific, fail gracefully if absent)
+        // Parse MPR costume chain singletons (Katana common DBs; fail gracefully if absent)
         var costumeNameToOid    = ParseScndb();
         var cosOidToMiObjIds    = ParseCe1Common();
         var (miToMprKtid, miToKts, matEdObjToG1t) = ParseMaterialEditor();

@@ -205,33 +205,23 @@ public sealed partial class MainViewModel : ObservableObject
                 var list     = new List<AssetItemViewModel>();
                 var rdbInfos = new List<Core.GameLoadCache.RdbInfo>();
 
-                // Check for Kashira mod-manager backup directory.
-                // If a backup copy of an RDB exists there, load the backup (original, unmodded)
-                // for the asset index while fdata files remain at their original location.
-                string kashiraBackup = Path.Combine(_profile.GameDirectory, "_Kashira", "backup");
-
+                // Resolve the Kashira mod-manager backup vs. live RDB per database.
+                // Uses _Kashira/rdbpatch.json to detect when the game was updated after patching,
+                // in which case the backup is stale and the live RDB (matching the current fdata)
+                // must be used instead. See KashiraBackup for the decision logic.
                 foreach (var rdbFile in rdbFiles)
                 {
-                    string rdbName  = Path.GetFileName(rdbFile);
-                    string rdxName  = Path.ChangeExtension(rdbName, ".rdx");
+                    string rdbName = Path.GetFileName(rdbFile);
+                    string liveRdx = Path.ChangeExtension(rdbFile, ".rdx");
 
-                    string backupRdb = Path.Combine(kashiraBackup, rdbName);
-                    string backupRdx = Path.Combine(kashiraBackup, rdxName);
-
-                    string actualRdb = File.Exists(backupRdb) ? backupRdb : rdbFile;
-                    string actualRdx = File.Exists(backupRdx)
-                        ? backupRdx
-                        : Path.ChangeExtension(rdbFile, ".rdx");
-
-                    if (actualRdb != rdbFile)
-                        AppLogger.Info($"[RDB] Kashira backup detected, using backup of {rdbName}");
+                    var (actualRdb, actualRdx) = Services.KashiraBackup.Resolve(
+                        _profile.GameDirectory, rdbFile, liveRdx);
 
                     // Record the file that was actually used for cache invalidation.
                     long modTicks = File.GetLastWriteTimeUtc(actualRdb).Ticks;
                     rdbInfos.Add(new Core.GameLoadCache.RdbInfo(actualRdb, modTicks));
 
-                    var rdxFile = actualRdx;
-                    var reader  = new RdbReader(actualRdb, rdxFile);
+                    var reader = new RdbReader(actualRdb, actualRdx);
 
                     if (!reader.Load())
                     {
@@ -459,34 +449,39 @@ public sealed partial class MainViewModel : ObservableObject
             names = await Task.Run(() => NameDictionaryService.Load(csvPath));
             AppLogger.Info($"[NameDictionary] CSV loaded ({exeName}): {names.Count} entries");
         }
-        else if (exeName.Equals("DOA6LR", StringComparison.OrdinalIgnoreCase)) // DOA6LR — auto-recover from kidsscndb chain
-        {
-            AppLogger.Info("[Doa6Name] No CSV found — running DOA6LR name recovery...");
-            StatusText = "Recovering names (DOA6LR)...";
-            names = await Doa6NameRecovery.BuildAsync(_allAssetsByKtid, _extractor!);
-            if (names.Count > 0)
-                await Task.Run(() => NameDictionaryService.Save(csvPath, names));
-        }
         else
         {
-            names = [];
-            AppLogger.Info($"[NameDictionary] No CSV found ({exeName})");
+            // No CSV — attempt Katana common-singleton name recovery. The driver DOKs are Katana
+            // Engine common singletons (identical FileKtids across all titles), so this works for
+            // any Katana game; it returns [] and no-ops when those DOKs are absent.
+            AppLogger.Info($"[KatanaName] No CSV found ({exeName}) — running name recovery...");
+            StatusText = "Recovering names...";
+            names = await KatanaNameRecovery.BuildAsync(_allAssetsByKtid, _extractor!);
+            if (names.Count > 0)
+                await Task.Run(() => NameDictionaryService.Save(csvPath, names));
+            else
+                AppLogger.Info($"[NameDictionary] No names recovered ({exeName})");
         }
 
         _nameMap = names;
 
         // Apply names off the UI thread. PropertyChanged from a background thread is safe in WPF —
         // the binding engine marshals updates to the dispatcher automatically.
+        // Game-specific names (CSV / recovery) take priority; Katana common-infrastructure names
+        // (engine-fixed hashes, identical across all titles) fill in as a baseline overlay.
         var snapshot = Assets.ToList();
         await Task.Run(() =>
         {
             foreach (var a in snapshot)
-                if (_nameMap.TryGetValue(a.Record.FileKtid, out string? n))
+            {
+                if (_nameMap.TryGetValue(a.Record.FileKtid, out string? n)
+                    || KatanaCommonNames.Map.TryGetValue(a.Record.FileKtid, out n))
                     a.RecoveredName = n;
+            }
         });
 
         int matched = snapshot.Count(a => a.RecoveredName != null);
-        AppLogger.Info($"[NameDictionary] {names.Count} loaded, {matched} applied");
+        AppLogger.Info($"[NameDictionary] {names.Count} loaded (+{KatanaCommonNames.Map.Count} common), {matched} applied");
     }
 
     // ── G1M companion file discovery ─────────────────────────────────────────
@@ -642,7 +637,7 @@ public sealed partial class MainViewModel : ObservableObject
         ushort fid     = vm.Record.FdataId;
         string rdbName = vm.RdbName;
 
-        // Priority 1: MasterDokCache — CE singleton DM-chain (DOA6 only; returns null for other games)
+        // Priority 1: MasterDokCache — CE-singleton DM-chain (Katana common DBs; returns null when absent)
         if (_masterDokCache != null)
         {
             var mapped = await _masterDokCache.GetG1tFilesAsync(ktid);
@@ -781,7 +776,7 @@ public sealed partial class MainViewModel : ObservableObject
             ? Path.GetFileNameWithoutExtension(vm.DisplayName)
             : string.Empty;
 
-        // ── Step 1: DM record full-prop scan (DOA6 via MasterDokCache) ──────────
+        // ── Step 1: DM record full-prop scan (via MasterDokCache; Katana common DBs) ──────────
         // Reads every UInt32 property from the Displayset::Model IDOK and collects
         // any value that is a known FileKtid in the RDB.  Catches GRP, MTL, MUD DOK, SID etc.
         var companionFks = new HashSet<uint>();

@@ -5,22 +5,27 @@ using KissakiViewer.ViewModels;
 namespace KissakiViewer.Core.Formats;
 
 /// <summary>
-/// DOA6LR-specific name recovery via kidsscndb → CharacterSetting → RenderSetting → CE G1M chain.
-/// Triggered automatically when no name CSV exists for DOA6LR.csv.
+/// Katana Engine G1M name recovery via kidsscndb → CharacterSetting → RenderSetting → CE G1M chain.
+/// Triggered automatically when no name CSV exists for the current game.
 ///
-/// Chain (all FKs are DOA6LR constants verified against KAS_COS_006→0x0957FBEC):
-///   kidsscndb  FK=0x6D011726 — CharacterNameArray (prop 0x4D269345) + HashArray (prop 0x8F9F2DA6)
-///   big DOK    FK=0x2082AD97 — type=0xD186CEEB: hash[i] → prop 0x68A6F779 → RenderSetting oid
-///                              type=0xC4B9B28D: RS oid → prop 0x0B6E1578 → CE G1M IDOK oid
-///   CE DOK     FK=0xB290631C — type=0xD40B3C8F: CE G1M IDOK oid → prop 0x8AB68B3F → G1M FileKtid
+/// All three driver DOKs are Katana Engine common singletons — their FileKtids are identical
+/// across every Katana title (verified against fdata_dump/rdb_common.csv), so this chain works
+/// for any game that ships them. When a DOK is absent, BuildAsync returns [] and the caller
+/// simply falls back to no recovery.
 ///
-/// Coverage: ~1632/1650 names (98.9%). The 18 failures are DLC-only or non-model entries.
+/// Chain (FKs verified against DOA6LR KAS_COS_006→0x0957FBEC):
+///   ProjectCommonResource.motor.kidsscndb  FK=0x6D011726 — CharacterNameArray (prop 0x4D269345) + HashArray (prop 0x8F9F2DA6)
+///   CE1CommonResource.motor.kidsobjdb      FK=0x2082AD97 — type=0xD186CEEB: hash[i] → prop 0x68A6F779 → RenderSetting oid
+///                                                          type=0xC4B9B28D: RS oid → prop 0x0B6E1578 → CE G1M IDOK oid
+///   CharacterEditor.kidssingletondb        FK=0xB290631C — type=0xD40B3C8F: CE G1M IDOK oid → prop 0x8AB68B3F → G1M FileKtid
+///
+/// Coverage (DOA6LR): ~1632/1650 names (98.9%). The 18 failures are DLC-only or non-model entries.
 /// </summary>
-public static class Doa6NameRecovery
+public static class KatanaNameRecovery
 {
-    private const uint FkScndb  = 0x6D011726u;
-    private const uint FkBigDok = 0x2082AD97u;
-    private const uint FkCeDok  = 0xB290631Cu;
+    private const uint FkScndb  = 0x6D011726u;  // ProjectCommonResource.motor.kidsscndb
+    private const uint FkBigDok = 0x2082AD97u;  // CE1CommonResource.motor.kidsobjdb
+    private const uint FkCeDok  = 0xB290631Cu;  // CharacterEditor.kidssingletondb
 
     private const uint TypeCharacterSetting = 0xD186CEEBu;
     private const uint TypeRenderSetting    = 0xC4B9B28Du;
@@ -43,7 +48,7 @@ public static class Doa6NameRecovery
             !assetsByKtid.TryGetValue(FkBigDok, out var bigDokAsset) ||
             !assetsByKtid.TryGetValue(FkCeDok,  out var ceDokAsset))
         {
-            AppLogger.Warn("[Doa6Name] Required DOK FKs not found — name recovery skipped");
+            AppLogger.Warn("[KatanaName] Required DOK FKs not found — name recovery skipped");
             return [];
         }
 
@@ -59,11 +64,11 @@ public static class Doa6NameRecovery
 
         if (scndbData.Length == 0 || bigDokData.Length == 0 || ceDokData.Length == 0)
         {
-            AppLogger.Warn("[Doa6Name] Extraction failed for one or more DOK files");
+            AppLogger.Warn("[KatanaName] Extraction failed for one or more DOK files");
             return [];
         }
 
-        AppLogger.Info($"[Doa6Name] Extracted: scndb={scndbData.Length}B  bigDok={bigDokData.Length}B  ceDok={ceDokData.Length}B");
+        AppLogger.Info($"[KatanaName] Extracted: scndb={scndbData.Length}B  bigDok={bigDokData.Length}B  ceDok={ceDokData.Length}B");
 
         // Parallel parsing
         var p1 = Task.Run(() => ParseScndb(scndbData));
@@ -77,12 +82,12 @@ public static class Doa6NameRecovery
 
         if (names.Length == 0)
         {
-            AppLogger.Warn("[Doa6Name] scndb returned no names");
+            AppLogger.Warn("[KatanaName] scndb returned no names");
             return [];
         }
 
         AppLogger.Info(
-            $"[Doa6Name] Parsed: scndb={names.Length}  csToRs={csToRs.Count}  rsToCeOid={rsToCeOid.Count}  ceOid→FK={ceOidToG1mFk.Count}");
+            $"[KatanaName] Parsed: scndb={names.Length}  csToRs={csToRs.Count}  rsToCeOid={rsToCeOid.Count}  ceOid→FK={ceOidToG1mFk.Count}");
 
         // Assemble chain
         var result = new Dictionary<uint, string>();
@@ -97,9 +102,47 @@ public static class Doa6NameRecovery
             result[g1mFk] = names[i] + ".g1m";
         }
 
+        int g1mCount   = result.Count;
+        int companions = DeriveCompanions(result, assetsByKtid);
+
         AppLogger.Info(
-            $"[Doa6Name] Result: {result.Count}/{count} mapped  (noRS={noRs}  noCeOid={noCeOid}  noG1mFk={noG1mFk})");
+            $"[KatanaName] Result: {g1mCount}/{count} G1M mapped  (noRS={noRs}  noCeOid={noCeOid}  noG1mFk={noG1mFk}); +{companions} companions derived");
         return result;
+    }
+
+    // Model-companion extensions that share a G1M's base name (per fdata_dump Displayset::Model
+    // derivation). Textures (.g1t) are NOT here — they carry unknown suffixes and are resolved via
+    // the KTID→G1T chain instead.
+    private static readonly string[] CompanionExts =
+        ["ktid", "mtl", "grp", "oid", "oidex", "swg", "rigbin"];
+
+    /// <summary>
+    /// For each recovered "&lt;base&gt;.g1m", forward-hashes every model companion (&lt;base&gt;.ktid /
+    /// .mtl / .grp / …) via <see cref="KatanaHasher"/> and adds a name for any hash that resolves to
+    /// a real asset. Only runs on the no-CSV recovery path, so a curated per-game CSV always wins.
+    /// Returns the number of companion names added.
+    /// </summary>
+    private static int DeriveCompanions(
+        Dictionary<uint, string> result,
+        IReadOnlyDictionary<uint, AssetItemViewModel> assetsByKtid)
+    {
+        // Snapshot base names first — we mutate `result` while deriving.
+        var bases = new List<string>(result.Count);
+        foreach (string name in result.Values)
+            bases.Add(name.EndsWith(".g1m", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name);
+
+        int added = 0;
+        foreach (string b in bases)
+        {
+            foreach (string ext in CompanionExts)
+            {
+                string cand = $"{b}.{ext}";
+                uint fk = KatanaHasher.Hash(cand);
+                if (assetsByKtid.ContainsKey(fk) && result.TryAdd(fk, cand))
+                    added++;
+            }
+        }
+        return added;
     }
 
     private static (string[] names, uint[] hashes) ParseScndb(byte[] data)
