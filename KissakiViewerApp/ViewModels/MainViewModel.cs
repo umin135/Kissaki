@@ -205,6 +205,11 @@ public sealed partial class MainViewModel : ObservableObject
                 var list     = new List<AssetItemViewModel>();
                 var rdbInfos = new List<Core.GameLoadCache.RdbInfo>();
 
+                // Container existence is checked once per container (a few hundred files),
+                // so rows whose data was never shipped can be flagged before any extraction.
+                var containerExists = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                int missingCount = 0;
+
                 // Resolve the Kashira mod-manager backup vs. live RDB per database.
                 // Uses _Kashira/rdbpatch.json to detect when the game was updated after patching,
                 // in which case the backup is stale and the live RDB (matching the current fdata)
@@ -238,11 +243,18 @@ public sealed partial class MainViewModel : ObservableObject
                     foreach (var rec in reader.Entries)
                     {
                         string container = reader.ResolveFdata(rec.FdataId);
-                        list.Add(new AssetItemViewModel(rec, container, rdbName));
+                        if (!containerExists.TryGetValue(container, out bool exists))
+                            containerExists[container] = exists = extractor.ContainerExists(container);
+                        if (!exists) missingCount++;
+                        list.Add(new AssetItemViewModel(rec, container, rdbName, isContainerMissing: !exists));
                     }
 
                     AppLogger.Info($"[RDB] {rdbName}: {reader.Entries.Count:N0} entries");
                 }
+
+                int missingContainers = containerExists.Count(kv => !kv.Value);
+                if (missingContainers > 0)
+                    AppLogger.Info($"[RDB] {missingCount:N0} assets reference {missingContainers} container(s) not present on disk — listed but not extractable");
 
                 if (_rdb == null)
                     throw new InvalidDataException("No RDB files loaded");
@@ -705,6 +717,12 @@ public sealed partial class MainViewModel : ObservableObject
         if (SelectedAsset is null || _extractor is null) return;
         var vm = SelectedAsset;
 
+        if (vm.IsContainerMissing)
+        {
+            StatusText = $"Cannot export {vm.DisplayFileName}: container {vm.Container} is not installed";
+            return;
+        }
+
         string exportDir = GetExportDir(vm, bundle: false);
         string name      = ExportFileName(vm);
 
@@ -887,6 +905,11 @@ public sealed partial class MainViewModel : ObservableObject
                 var hashByName = new Dictionary<string, string>();
                 foreach (var asset in toExport.DistinctBy(a => a.Record.FileKtid))
                 {
+                    if (asset.IsContainerMissing)
+                    {
+                        AppLogger.Warn($"[Bundle] skipped (container not installed): {asset.DisplayFileName} → {asset.Container}");
+                        continue;
+                    }
                     string name = ExportFileName(asset);
                     byte[] raw  = extractor.ExtractToMemory(asset.Record, asset.Container);
                     File.WriteAllBytes(Path.Combine(exportDir, name), raw);

@@ -94,6 +94,11 @@ public partial class MainWindow : Window
     {
         var asset = _vm.SelectedAsset;
         if (asset == null || _vm.Extractor == null) return;
+        if (asset.IsContainerMissing)
+        {
+            _vm.StatusText = $"Cannot open {asset.DisplayFileName}: container {asset.Container} is not installed";
+            return;
+        }
         OpenInViewer(asset);
     }
 

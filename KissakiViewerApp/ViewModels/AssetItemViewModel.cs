@@ -17,6 +17,18 @@ public sealed partial class AssetItemViewModel : ObservableObject
     /// <summary>Source RDB filename (e.g. "root.rdb", "system.rdb"). Used as top-level folder in the tree.</summary>
     public string      RdbName  { get; }
 
+    /// <summary>
+    /// True when the RDB indexes this asset but its .fdata container is not on disk.
+    /// Retail builds keep index entries for containers that were never shipped
+    /// (e.g. every .name entry in DOA6), so these assets can be listed but not extracted.
+    /// </summary>
+    public bool        IsContainerMissing { get; }
+
+    /// <summary>Row tooltip explaining why the asset cannot be extracted (null when available).</summary>
+    public string?     UnavailableReason => IsContainerMissing
+        ? $"Container not installed: {Container}\nThis asset is listed in the RDB index, but its data is not in the game folder and cannot be extracted."
+        : null;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(DisplayName))]
     [NotifyPropertyChangedFor(nameof(DisplayFileName))]
@@ -47,11 +59,13 @@ public sealed partial class AssetItemViewModel : ObservableObject
     [ObservableProperty]
     private bool _isSelected;
 
-    public AssetItemViewModel(AssetRecord record, string container, string rdbName = "root.rdb")
+    public AssetItemViewModel(AssetRecord record, string container, string rdbName = "root.rdb",
+                              bool isContainerMissing = false)
     {
-        Record    = record;
-        Container = container;
-        RdbName   = rdbName;
+        Record             = record;
+        Container          = container;
+        RdbName            = rdbName;
+        IsContainerMissing = isContainerMissing;
     }
 
     private static string GetBaseName(string path)

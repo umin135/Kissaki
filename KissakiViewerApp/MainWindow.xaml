@@ -285,16 +285,28 @@
                                     <Setter.Value>
                                         <ContextMenu>
                                             <!-- PlacementTarget = ListViewItem; .Tag = MainViewModel; .DataContext = AssetItemViewModel -->
+                                            <!-- Shown when the asset's .fdata container is not installed -->
+                                            <MenuItem Header="⚠ Container not installed — cannot export"
+                                                      IsEnabled="False"
+                                                      Visibility="{Binding PlacementTarget.DataContext.IsContainerMissing,
+                                                                   RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                   Converter={StaticResource BoolToVis}}"/>
                                             <!-- G1M-only items -->
                                             <MenuItem Header="Raw Export (.g1m)"
                                                       Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
                                                                 RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      IsEnabled="{Binding PlacementTarget.DataContext.IsContainerMissing,
+                                                                  RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                  Converter={StaticResource InvertBool}}"
                                                       Visibility="{Binding PlacementTarget.DataContext.IsG1m,
                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                                    Converter={StaticResource BoolToVis}}"/>
                                             <MenuItem Header="Raw Export (Bundle)"
                                                       Command="{Binding PlacementTarget.Tag.ExportBundleCommand,
                                                                 RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      IsEnabled="{Binding PlacementTarget.DataContext.IsContainerMissing,
+                                                                  RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                  Converter={StaticResource InvertBool}}"
                                                       Visibility="{Binding PlacementTarget.DataContext.IsG1m,
                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                                    Converter={StaticResource BoolToVis}}"/>
@@ -302,6 +314,9 @@
                                             <MenuItem Header="Raw Export"
                                                       Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
                                                                 RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      IsEnabled="{Binding PlacementTarget.DataContext.IsContainerMissing,
+                                                                  RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                  Converter={StaticResource InvertBool}}"
                                                       Visibility="{Binding PlacementTarget.DataContext.IsG1m,
                                                                    RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                                    Converter={StaticResource InvertBoolToVis}}"/>
@@ -309,6 +324,11 @@
                                     </Setter.Value>
                                 </Setter>
                                 <Style.Triggers>
+                                    <!-- Asset indexed in the RDB but its container is not on disk -->
+                                    <DataTrigger Binding="{Binding IsContainerMissing}" Value="True">
+                                        <Setter Property="Opacity" Value="0.45"/>
+                                        <Setter Property="ToolTip" Value="{Binding UnavailableReason}"/>
+                                    </DataTrigger>
                                     <Trigger Property="IsMouseOver" Value="True">
                                         <Setter Property="Background" Value="#1F1F1F"/>
                                     </Trigger>
@@ -324,9 +344,15 @@
                                 <GridViewColumn Header="Name" Width="300">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
-                                            <TextBlock Text="{Binding DisplayName}"
-                                                       FontFamily="Consolas" FontSize="12"
-                                                       TextTrimming="CharacterEllipsis"/>
+                                            <DockPanel>
+                                                <TextBlock DockPanel.Dock="Left" Text="⚠" Margin="0,0,5,0"
+                                                           Foreground="#E0A030" FontSize="11"
+                                                           VerticalAlignment="Center"
+                                                           Visibility="{Binding IsContainerMissing, Converter={StaticResource BoolToVis}}"/>
+                                                <TextBlock Text="{Binding DisplayName}"
+                                                           FontFamily="Consolas" FontSize="12"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                            </DockPanel>
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
@@ -349,8 +375,21 @@
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding Container}"
-                                                       FontFamily="Consolas" FontSize="11" Opacity="0.45"
-                                                       TextTrimming="CharacterEllipsis"/>
+                                                       FontFamily="Consolas" FontSize="11"
+                                                       TextTrimming="CharacterEllipsis">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Opacity" Value="0.45"/>
+                                                        <Style.Triggers>
+                                                            <!-- Missing container: struck through so it reads as "not on disk" -->
+                                                            <DataTrigger Binding="{Binding IsContainerMissing}" Value="True">
+                                                                <Setter Property="Opacity" Value="0.9"/>
+                                                                <Setter Property="TextDecorations" Value="Strikethrough"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
@@ -414,16 +453,27 @@
                                     <Setter Property="ContextMenu">
                                         <Setter.Value>
                                             <ContextMenu>
+                                                <MenuItem Header="⚠ Container not installed — cannot export"
+                                                          IsEnabled="False"
+                                                          Visibility="{Binding PlacementTarget.DataContext.IsContainerMissing,
+                                                                       RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                       Converter={StaticResource BoolToVis}}"/>
                                                 <!-- G1M-only items -->
                                                 <MenuItem Header="Raw Export (.g1m)"
                                                           Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
                                                                     RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          IsEnabled="{Binding PlacementTarget.DataContext.IsContainerMissing,
+                                                                      RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                      Converter={StaticResource InvertBool}}"
                                                           Visibility="{Binding PlacementTarget.DataContext.IsG1m,
                                                                        RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                                        Converter={StaticResource BoolToVis}}"/>
                                                 <MenuItem Header="Raw Export (Bundle)"
                                                           Command="{Binding PlacementTarget.Tag.ExportBundleCommand,
                                                                     RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          IsEnabled="{Binding PlacementTarget.DataContext.IsContainerMissing,
+                                                                      RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                      Converter={StaticResource InvertBool}}"
                                                           Visibility="{Binding PlacementTarget.DataContext.IsG1m,
                                                                        RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                                        Converter={StaticResource BoolToVis}}"/>
@@ -431,6 +481,9 @@
                                                 <MenuItem Header="Raw Export"
                                                           Command="{Binding PlacementTarget.Tag.ExportSelectedCommand,
                                                                     RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          IsEnabled="{Binding PlacementTarget.DataContext.IsContainerMissing,
+                                                                      RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                                      Converter={StaticResource InvertBool}}"
                                                           Visibility="{Binding PlacementTarget.DataContext.IsG1m,
                                                                        RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                                        Converter={StaticResource InvertBoolToVis}}"/>
@@ -438,6 +491,10 @@
                                         </Setter.Value>
                                     </Setter>
                                     <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsContainerMissing}" Value="True">
+                                            <Setter Property="Opacity" Value="0.45"/>
+                                            <Setter Property="ToolTip" Value="{Binding UnavailableReason}"/>
+                                        </DataTrigger>
                                         <Trigger Property="IsSelected" Value="True">
                                             <Setter Property="Background" Value="#c0392b"/>
                                         </Trigger>
